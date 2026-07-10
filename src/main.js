@@ -540,9 +540,11 @@ async function startBrowserLogin(credentials) {
     if (!response.ok || typeof tokens.access_token !== "string" || typeof tokens.refresh_token !== "string") throw new Error("OpenAI did not return a valid session.");
     const identity = extractIdentity(tokens.access_token, tokens.id_token);
     const storage = await loadStorage();
+    const wasEmpty = storage.accounts.length === 0;
     const existingIndex = storage.accounts.findIndex((account) =>
       (identity.accountId && account.accountId === identity.accountId) || (identity.email && account.email === identity.email),
     );
+    const wasActive = existingIndex === storage.activeIndex;
     const account = {
       id: existingIndex >= 0 ? storage.accounts[existingIndex].id : randomBytes(12).toString("hex"),
       email: identity.email,
@@ -560,8 +562,8 @@ async function startBrowserLogin(credentials) {
     };
     if (existingIndex >= 0) storage.accounts[existingIndex] = account;
     else storage.accounts.push(account);
-    storage.activeIndex = existingIndex >= 0 ? existingIndex : storage.accounts.length - 1;
-    await syncAccountToCodex(account);
+    if (wasEmpty) storage.activeIndex = 0;
+    if (wasEmpty || wasActive) await syncAccountToCodex(account);
     await writeSecretJson(ACCOUNTS_PATH, storage);
     // Login is complete only after the new active account has a fresh quota row.
     await refreshUsageQuota(new Set([account.id])).catch(() => undefined);

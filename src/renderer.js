@@ -57,8 +57,8 @@ function render(data) {
     const [tone, status] = statusFor(account);
     const displayName = account.email || account.label;
     const savedLoginActions = account.hasSavedLogin
-      ? `<button class="button compact secondary" data-relogin="${account.index}" title="Sign in again with saved credentials">Re-login</button><button class="button compact secondary" data-copy="email" data-index="${account.index}" title="Copy email">Email</button><button class="button compact secondary" data-copy="password" data-index="${account.index}" title="Copy password">Pass</button><button class="button compact secondary" data-copy="totp" data-index="${account.index}" title="Copy current 2FA code">2FA</button>`
-      : `<button class="button compact secondary" disabled title="Login details were not saved for this account">Re-login</button>`;
+      ? `<button class="icon-button action-icon" data-relogin="${account.index}" aria-label="Sign in again with saved credentials" title="Sign in again">↻</button><details class="copy-menu"><summary class="icon-button action-icon" aria-label="Copy login details" title="Copy login details">⧉</summary><div class="copy-popover"><button data-copy="email" data-index="${account.index}">Copy email</button><button data-copy="password" data-index="${account.index}">Copy password</button><button data-copy="totp" data-index="${account.index}">Copy 2FA code</button></div></details>`
+      : `<button class="icon-button action-icon" disabled aria-label="Login details were not saved for this account" title="Login details were not saved">↻</button>`;
     const switchLabel = account.current ? "Đang chọn" : "Switch";
     const deleteButton = account.current ? "" : `<button class="icon-button" data-delete="${account.index}" aria-label="Remove ${escapeHtml(displayName)}" title="Remove account">×</button>`;
     return `<tr>
@@ -227,6 +227,7 @@ body.addEventListener("click", async (event) => {
     const field = button.dataset.copy;
     const label = { email: "Email", password: "Password", totp: "2FA code" }[field] || "Value";
     await run(() => window.codexAuth.copyLogin(index, field), `${label} copied.`);
+    button.closest(".copy-menu")?.removeAttribute("open");
     return;
   }
   if (button.dataset.relogin !== undefined) {

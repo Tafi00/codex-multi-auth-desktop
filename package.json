@@ -1,6 +1,6 @@
 {
   "name": "codex-multi-auth-desktop",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "description": "A simple desktop manager for Codex multi-account sessions.",
   "author": "Local",
   "type": "module",
