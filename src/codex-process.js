@@ -86,6 +86,7 @@ function Request-CodexQuit {
         # Use Codex's own File > Exit command. It calls app.quit(), allowing the
         # app to flush state and close its workers instead of being force-killed.
         $window = [System.Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
+        $window.SetFocus()
         $fileCondition = New-Object System.Windows.Automation.PropertyCondition(
           [System.Windows.Automation.AutomationElement]::NameProperty,
           'File'
@@ -124,6 +125,25 @@ function Request-CodexQuit {
     }
     Start-Sleep -Milliseconds 100
   } while ([DateTime]::UtcNow -lt $retryDeadline)
+
+  return $false
+}
+
+function Request-CodexWindowClose {
+  param($Package)
+
+  # File > Exit sometimes is not exposed to UI Automation while Codex is
+  # restoring its window. CloseMainWindow sends the same normal WM_CLOSE as
+  # clicking the title-bar X; it is not a force kill and lets Codex flush state.
+  foreach ($process in @(Get-CodexProcesses $Package)) {
+    try {
+      if ($process.MainWindowHandle -ne 0 -and $process.CloseMainWindow()) {
+        return $true
+      }
+    } catch {
+      # Refresh the process list and try another visible Codex window.
+    }
+  }
 
   return $false
 }
@@ -199,7 +219,9 @@ $executablePath = $codexProcesses |
 
 if ($codexProcesses.Count -gt 0) {
   if (-not (Request-CodexQuit $packagedCodex)) {
-    throw 'Codex is running, but its File > Exit command could not be clicked within 5 seconds.'
+    if (-not (Request-CodexWindowClose $packagedCodex)) {
+      throw 'Codex is running, but neither File > Exit nor a normal window close could be requested.'
+    }
   }
 }
 

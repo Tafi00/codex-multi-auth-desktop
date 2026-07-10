@@ -37,13 +37,15 @@ test("restarts Codex through PowerShell on Windows", async () => {
   assert.match(script, /Get-CodexProcesses/);
   assert.match(script, /Get-CodexUiProcesses/);
   assert.match(script, /Request-CodexQuit/);
+  assert.match(script, /Request-CodexWindowClose/);
   assert.match(script, /\$retryDeadline = \[DateTime\]::UtcNow.AddSeconds\(5\)/);
   assert.match(script, /Get-CodexProcesses \$Package/);
   assert.match(script, /Add-Type -AssemblyName UIAutomationClient/);
   assert.match(script, /ExpandCollapsePattern/);
   assert.match(script, /\^Exit\(\?:\\s\|\$\)/);
   assert.match(script, /InvokePattern/);
-  assert.doesNotMatch(script, /CloseMainWindow\(\)/);
+  assert.match(script, /\$window\.SetFocus\(\)/);
+  assert.match(script, /\$process\.CloseMainWindow\(\)/);
   assert.doesNotMatch(script, /Stop-Process -Force/);
   assert.match(script, /Get-AppxPackage -Name 'OpenAI\.Codex'/);
   assert.match(script, /Get-StartApps/);
