@@ -53,11 +53,12 @@ function render(data) {
   dashboard = data;
   const accounts = data.accounts ?? [];
   summary.textContent = accounts.length ? `${accounts.length} accounts` : "No accounts";
-  body.innerHTML = accounts.map((account) => {
+  body.innerHTML = accounts.map((account, accountPosition) => {
     const [tone, status] = statusFor(account);
     const displayName = account.email || account.label;
+    const copyMenuPosition = accountPosition >= accounts.length - 2 ? "above" : "";
     const savedLoginActions = account.hasSavedLogin
-      ? `<button class="icon-button action-icon" data-relogin="${account.index}" aria-label="Sign in again with saved credentials" title="Sign in again">↻</button><details class="copy-menu"><summary class="icon-button action-icon" aria-label="Copy login details" title="Copy login details">⧉</summary><div class="copy-popover"><button data-copy="email" data-index="${account.index}">Copy email</button><button data-copy="password" data-index="${account.index}">Copy password</button><button data-copy="totp" data-index="${account.index}">Copy 2FA code</button></div></details>`
+      ? `<button class="icon-button action-icon" data-relogin="${account.index}" aria-label="Sign in again with saved credentials" title="Sign in again">↻</button><details class="copy-menu ${copyMenuPosition}"><summary class="icon-button action-icon" aria-label="Copy login details" title="Copy login details">⧉</summary><div class="copy-popover"><button data-copy="email" data-index="${account.index}">Copy email</button><button data-copy="password" data-index="${account.index}">Copy password</button><button data-copy="totp" data-index="${account.index}">Copy 2FA code</button></div></details>`
       : `<button class="icon-button action-icon" disabled aria-label="Login details were not saved for this account" title="Login details were not saved">↻</button>`;
     const switchLabel = account.current ? "Đang chọn" : "Switch";
     const deleteButton = account.current ? "" : `<button class="icon-button" data-delete="${account.index}" aria-label="Remove ${escapeHtml(displayName)}" title="Remove account">×</button>`;
