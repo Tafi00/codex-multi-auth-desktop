@@ -19,23 +19,23 @@ jobs:
         include:
           - os: windows-latest
             platform: Windows
-            command: npm run package:win
+            command: npm run package:win -- --publish never
             artifact: release-windows
             files: |
               outputs/*.exe
               outputs/*.blockmap
           - os: macos-latest
             platform: macOS
-            command: npm run package:mac
+            command: npm run package:mac -- --publish never
             artifact: release-macos
             files: |
               outputs/*.dmg
               outputs/*.zip
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -44,8 +44,8 @@ jobs:
 
       - run: ${{ matrix.command }}
         env:
-          # Public releases are unsigned unless macOS signing credentials are
-          # configured later; this keeps the build independent of personal keys.
+          # Publishing is handled only by the publish job below through the
+          # built-in GITHUB_TOKEN, so these builds never need a personal token.
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
       - uses: actions/upload-artifact@v4
