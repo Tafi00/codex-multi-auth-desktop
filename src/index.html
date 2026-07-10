@@ -69,6 +69,30 @@
       </form>
     </dialog>
 
+    <dialog id="loginDialog">
+      <form method="dialog" class="dialog-content" id="loginForm">
+        <p class="eyebrow">LOGIN ACCOUNT</p>
+        <h2>Sign in to Codex</h2>
+        <p>Thông tin chỉ dùng trong bộ nhớ để điền OAuth window và không được lưu vào app.</p>
+        <label class="form-field">
+          <span>Email</span>
+          <input id="loginEmail" name="email" type="email" autocomplete="username" required />
+        </label>
+        <label class="form-field">
+          <span>Password</span>
+          <input id="loginPassword" name="password" type="password" autocomplete="current-password" required />
+        </label>
+        <label class="form-field">
+          <span>2FA secret (optional)</span>
+          <input id="loginTotpSecret" name="totpSecret" type="password" autocomplete="off" spellcheck="false" placeholder="Base32 secret" />
+        </label>
+        <div class="dialog-actions">
+          <button class="button secondary" value="cancel" formnovalidate>Cancel</button>
+          <button class="button primary" value="confirm">Open browser &amp; sign in</button>
+        </div>
+      </form>
+    </dialog>
+
     <div class="toast" id="toast" role="status" hidden></div>
     <script type="module" src="renderer.js"></script>
   </body>

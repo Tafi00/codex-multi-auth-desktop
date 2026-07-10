@@ -2,7 +2,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("codexAuth", {
   load: () => ipcRenderer.invoke("accounts:load"),
-  login: () => ipcRenderer.invoke("accounts:login"),
+  login: (credentials) => ipcRenderer.invoke("accounts:login", credentials),
   cancelLogin: () => ipcRenderer.invoke("accounts:cancel-login"),
   refreshQuota: () => ipcRenderer.invoke("accounts:refresh-quota"),
   switchAccount: (index) => ipcRenderer.invoke("accounts:switch", index),

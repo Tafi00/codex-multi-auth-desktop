@@ -4,6 +4,8 @@ const emptyState = $("#emptyState");
 const summary = $("#summary");
 const toast = $("#toast");
 const dialog = $("#confirmDialog");
+const loginDialog = $("#loginDialog");
+const loginForm = $("#loginForm");
 let dashboard = { accounts: [] };
 let busy = false;
 let loginInProgress = false;
@@ -85,6 +87,22 @@ function confirmAction(title, message) {
   });
 }
 
+function promptLoginCredentials() {
+  loginForm.reset();
+  loginDialog.showModal();
+  return new Promise((resolve) => {
+    loginDialog.addEventListener("close", () => {
+      const credentials = loginDialog.returnValue === "confirm" ? {
+        email: $("#loginEmail").value,
+        password: $("#loginPassword").value,
+        totpSecret: $("#loginTotpSecret").value,
+      } : null;
+      loginForm.reset();
+      resolve(credentials);
+    }, { once: true });
+  });
+}
+
 async function run(action, successMessage) {
   if (busy) return;
   setBusy(true);
@@ -107,11 +125,13 @@ async function handleLogin() {
     await window.codexAuth.cancelLogin();
     return;
   }
+  const credentials = await promptLoginCredentials();
+  if (!credentials) return;
   loginInProgress = true;
   loginButton.textContent = "Cancel login";
   setBusy(true);
   try {
-    const result = await window.codexAuth.login();
+    const result = await window.codexAuth.login(credentials);
     if (result?.dashboard) render(result.dashboard);
     showToast("Đăng nhập thành công.", "success");
   } catch (error) {

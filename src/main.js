@@ -1,10 +1,11 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import { createHash, randomBytes } from "node:crypto";
 import http from "node:http";
 import { dirname, join } from "node:path";
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { restartCodex } from "./codex-process.js";
+import { generateTotpCode } from "./totp.js";
 
 const CODEX_HOME = process.env.CODEX_HOME?.trim() || join(homedir(), ".codex");
 const APP_DIR = join(CODEX_HOME, "multi-auth-desktop");
@@ -358,7 +359,11 @@ function startOAuthCallbackServer(state) {
   return new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(1455, "127.0.0.1", () => resolve({
-      close: () => { closed = true; server.close(); },
+      close: () => {
+        if (closed) return;
+        closed = true;
+        server.close();
+      },
       wait: () => new Promise((finish) => {
         const started = Date.now();
         const interval = setInterval(() => {
@@ -372,15 +377,101 @@ function startOAuthCallbackServer(state) {
   });
 }
 
-async function startBrowserLogin() {
+function normalizeLoginAutomation(credentials) {
+  const email = typeof credentials?.email === "string" ? credentials.email.trim().toLowerCase() : "";
+  const password = typeof credentials?.password === "string" ? credentials.password : "";
+  const totpSecret = typeof credentials?.totpSecret === "string" ? credentials.totpSecret.trim() : "";
+  if (!email || !password) throw new Error("Email and password are required.");
+  return { email, password, totpSecret };
+}
+
+function buildAutofillScript(selector, value) {
+  return `(() => {
+    const field = document.querySelector(${JSON.stringify(selector)});
+    if (!field || field.disabled) return false;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    if (!setter) return false;
+    setter.call(field, ${JSON.stringify(value)});
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+    field.dispatchEvent(new Event("change", { bubbles: true }));
+    const form = field.closest("form");
+    const submit = [...(form?.querySelectorAll("button") ?? [])].find((button) =>
+      !button.disabled && button.textContent.trim() === "Continue",
+    );
+    if (!submit) return false;
+    submit.click();
+    return true;
+  })()`;
+}
+
+function createOAuthLoginWindow(url, automation, callback) {
+  const loginWindow = new BrowserWindow({
+    width: 520,
+    height: 760,
+    minWidth: 460,
+    minHeight: 640,
+    parent: mainWindow,
+    title: "Sign in to Codex",
+    backgroundColor: "#ffffff",
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  const steps = [
+    { selector: 'input[type="email"], input[autocomplete="username"]', value: automation.email },
+    { selector: 'input[type="password"][autocomplete="current-password"], input[type="password"]', value: automation.password },
+    ...(automation.totpSecret ? [{ selector: 'input[autocomplete="one-time-code"], input[inputmode="numeric"]', value: () => generateTotpCode(automation.totpSecret) }] : []),
+  ];
+  let nextStep = 0;
+  let filling = false;
+
+  const tryAutofill = async () => {
+    if (filling || loginWindow.isDestroyed() || nextStep >= steps.length) return;
+    let pageUrl;
+    try {
+      pageUrl = new URL(loginWindow.webContents.getURL());
+    } catch {
+      return;
+    }
+    if (pageUrl.hostname !== "auth.openai.com") return;
+
+    filling = true;
+    try {
+      const step = steps[nextStep];
+      const value = typeof step.value === "function" ? step.value() : step.value;
+      const submitted = await loginWindow.webContents.executeJavaScript(buildAutofillScript(step.selector, value), true);
+      if (submitted) nextStep += 1;
+    } catch {
+      // The auth page may still be changing between redirects; navigation will retry.
+    } finally {
+      filling = false;
+    }
+  };
+
+  loginWindow.webContents.on("did-finish-load", tryAutofill);
+  loginWindow.webContents.on("did-navigate", tryAutofill);
+  loginWindow.on("closed", callback.close);
+  loginWindow.loadURL(url);
+  return loginWindow;
+}
+
+async function startBrowserLogin(credentials) {
   if (pendingLogin) throw new Error("A login is already in progress.");
+  let automation = normalizeLoginAutomation(credentials);
   const verifier = base64Url(randomBytes(48));
   const challenge = base64Url(createHash("sha256").update(verifier).digest());
   const state = base64Url(randomBytes(32));
   const callback = await startOAuthCallbackServer(state).catch(() => {
     throw new Error("Port 1455 is unavailable. Close another login flow and try again.");
   });
-  pendingLogin = callback;
+  let loginWindow;
+  const cancel = () => {
+    callback.close();
+    if (loginWindow && !loginWindow.isDestroyed()) loginWindow.close();
+  };
+  pendingLogin = { close: cancel };
   try {
     const url = new URL("https://auth.openai.com/oauth/authorize");
     url.search = new URLSearchParams({
@@ -388,7 +479,7 @@ async function startBrowserLogin() {
       scope: OAUTH_SCOPE, code_challenge: challenge, code_challenge_method: "S256", state,
       id_token_add_organizations: "true", codex_cli_simplified_flow: "true", originator: "codex_cli_rs", prompt: "login",
     }).toString();
-    await shell.openExternal(url.toString());
+    loginWindow = createOAuthLoginWindow(url.toString(), automation, callback);
     const code = await callback.wait();
     if (!code) throw new Error("Login was cancelled or timed out.");
     const response = await fetch("https://auth.openai.com/oauth/token", {
@@ -421,7 +512,8 @@ async function startBrowserLogin() {
     await refreshUsageQuota(new Set([account.id])).catch(() => undefined);
     return { dashboard: await getDashboard() };
   } finally {
-    callback.close();
+    cancel();
+    automation = null;
     pendingLogin = null;
   }
 }
@@ -438,8 +530,12 @@ ipcMain.handle("accounts:load", async () => {
   const probeErrors = await refreshUsageQuota();
   return { ...(await getDashboard()), probeErrors };
 });
-ipcMain.handle("accounts:login", () => startBrowserLogin());
-ipcMain.handle("accounts:cancel-login", () => { pendingLogin?.close(); return { cancelled: Boolean(pendingLogin) }; });
+ipcMain.handle("accounts:login", (_event, credentials) => startBrowserLogin(credentials));
+ipcMain.handle("accounts:cancel-login", () => {
+  const activeLogin = pendingLogin;
+  activeLogin?.close();
+  return { cancelled: Boolean(activeLogin) };
+});
 ipcMain.handle("accounts:refresh-quota", async () => {
   const probeErrors = await refreshUsageQuota();
   return { dashboard: await getDashboard(), probeErrors };
