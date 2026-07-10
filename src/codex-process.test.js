@@ -33,12 +33,26 @@ test("restarts Codex through PowerShell on Windows", async () => {
   assert.ok(args.includes("-NonInteractive"));
   const script = args.at(-1);
   assert.match(script, /Get-Process -Name 'Codex'/);
-  assert.match(script, /Stop-Process -Force/);
+  assert.match(script, /Get-Process -Name 'ChatGPT'/);
+  assert.match(script, /Get-CodexProcesses/);
+  assert.match(script, /Get-CodexUiProcesses/);
+  assert.match(script, /Request-CodexQuit/);
+  assert.match(script, /\$retryDeadline = \[DateTime\]::UtcNow.AddSeconds\(5\)/);
+  assert.match(script, /Get-CodexProcesses \$Package/);
+  assert.match(script, /Add-Type -AssemblyName UIAutomationClient/);
+  assert.match(script, /ExpandCollapsePattern/);
+  assert.match(script, /\^Exit\(\?:\\s\|\$\)/);
+  assert.match(script, /InvokePattern/);
+  assert.doesNotMatch(script, /CloseMainWindow\(\)/);
+  assert.doesNotMatch(script, /Stop-Process -Force/);
+  assert.match(script, /Get-AppxPackage -Name 'OpenAI\.Codex'/);
   assert.match(script, /Get-StartApps/);
   assert.match(script, /shell:AppsFolder/);
   assert.match(script, /\^\(OpenAI\\s\+\)\?Codex\$/);
   assert.match(script, /-notmatch '\\\\WindowsApps\\\\'/);
-  assert.ok(script.indexOf("Get-StartApps") < script.indexOf("$knownPaths ="));
+  assert.match(script, /Start-Sleep -Milliseconds 700/);
+  assert.doesNotMatch(script, /Wait-ForCodexExit/);
+  assert.match(script, /Windows accepted the launch request, but Codex did not start/);
   assert.deepEqual(options, { windowsHide: true, timeout: 20_000 });
 });
 
