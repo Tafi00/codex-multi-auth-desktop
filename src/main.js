@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, safeStorage } from "electron";
 import { createHash, randomBytes } from "node:crypto";
 import http from "node:http";
 import { dirname, join } from "node:path";
@@ -77,6 +77,13 @@ function normalizeAccount(account) {
     idToken: typeof account.idToken === "string" ? account.idToken : null,
     expiresAt: Number.isFinite(account.expiresAt) ? account.expiresAt : null,
     addedAt: Number.isFinite(account.addedAt) ? account.addedAt : Date.now(),
+    savedLogin: account.savedLogin && typeof account.savedLogin.email === "string" && typeof account.savedLogin.password === "string"
+      ? {
+        email: account.savedLogin.email.trim().toLowerCase(),
+        password: account.savedLogin.password,
+        totpSecret: typeof account.savedLogin.totpSecret === "string" ? account.savedLogin.totpSecret : null,
+      }
+      : null,
   };
 }
 
@@ -305,6 +312,7 @@ async function getDashboard() {
       label: account.email || `Account ${index + 1}`,
       current: index === storage.activeIndex,
       enabled: true,
+      hasSavedLogin: Boolean(account.savedLogin?.password),
       markers: primaryRemaining === 0 ? ["quota-exhausted"] : [],
       quota: quota ? {
         primaryUsedPercent: quota.primary.usedPercent,
@@ -383,6 +391,28 @@ function normalizeLoginAutomation(credentials) {
   const totpSecret = typeof credentials?.totpSecret === "string" ? credentials.totpSecret.trim() : "";
   if (!email || !password) throw new Error("Email and password are required.");
   return { email, password, totpSecret };
+}
+
+function encryptLoginSecret(value) {
+  if (!value) return null;
+  if (!safeStorage.isEncryptionAvailable()) throw new Error("Secure credential storage is unavailable on this device.");
+  return safeStorage.encryptString(value).toString("base64");
+}
+
+function decryptLoginSecret(value) {
+  if (!value) return "";
+  if (!safeStorage.isEncryptionAvailable()) throw new Error("Secure credential storage is unavailable on this device.");
+  return safeStorage.decryptString(Buffer.from(value, "base64"));
+}
+
+function savedLoginFor(account) {
+  const login = account?.savedLogin;
+  if (!login?.email || !login.password) return null;
+  return {
+    email: login.email,
+    password: decryptLoginSecret(login.password),
+    totpSecret: decryptLoginSecret(login.totpSecret),
+  };
 }
 
 function buildAutofillScript(selector, value) {
@@ -521,6 +551,11 @@ async function startBrowserLogin(credentials) {
       idToken: typeof tokens.id_token === "string" ? tokens.id_token : null,
       expiresAt: Date.now() + Math.max(60, Number(tokens.expires_in) || 3600) * 1000,
       addedAt: existingIndex >= 0 ? storage.accounts[existingIndex].addedAt : Date.now(),
+      savedLogin: {
+        email: automation.email,
+        password: encryptLoginSecret(automation.password),
+        totpSecret: encryptLoginSecret(automation.totpSecret),
+      },
     };
     if (existingIndex >= 0) storage.accounts[existingIndex] = account;
     else storage.accounts.push(account);
@@ -540,7 +575,11 @@ async function startBrowserLogin(credentials) {
 function assertImportShape(value) {
   const accounts = Array.isArray(value) ? value : value?.accounts;
   if (!Array.isArray(accounts) || accounts.length > 100) throw new Error("Invalid session export.");
-  const normalized = accounts.map(normalizeAccount).filter(Boolean);
+  const normalized = accounts.map((account) => {
+    const result = normalizeAccount(account);
+    if (result) result.savedLogin = null;
+    return result;
+  }).filter(Boolean);
   if (normalized.length !== accounts.length) throw new Error("Every imported account needs a refresh token.");
   return normalized;
 }
@@ -569,6 +608,32 @@ ipcMain.handle("accounts:switch", async (_event, index) => {
   await restartCodex();
   return getDashboard();
 });
+ipcMain.handle("accounts:relogin", async (_event, index) => {
+  const storage = await loadStorage();
+  const account = storage.accounts[index];
+  if (!account) throw new Error("Account was not found.");
+  const credentials = savedLoginFor(account);
+  if (!credentials) throw new Error("This account has no saved login details.");
+  return startBrowserLogin(credentials);
+});
+ipcMain.handle("accounts:copy-login", async (_event, index, field) => {
+  const storage = await loadStorage();
+  const account = storage.accounts[index];
+  if (!account) throw new Error("Account was not found.");
+  const credentials = savedLoginFor(account);
+  if (!credentials) throw new Error("This account has no saved login details.");
+
+  let value;
+  if (field === "email") value = credentials.email;
+  else if (field === "password") value = credentials.password;
+  else if (field === "totp") {
+    if (!credentials.totpSecret) throw new Error("This account has no saved 2FA secret.");
+    value = generateTotpCode(credentials.totpSecret);
+  } else throw new Error("Unknown login field.");
+
+  clipboard.writeText(value);
+  return { field };
+});
 ipcMain.handle("accounts:delete", async (_event, index) => {
   const storage = await loadStorage();
   if (!storage.accounts[index]) throw new Error("Account was not found.");
@@ -583,7 +648,8 @@ ipcMain.handle("accounts:export", async () => {
   if (!storage.accounts.length) throw new Error("There are no accounts to export.");
   const { filePath, canceled } = await dialog.showSaveDialog(mainWindow, { title: "Export Codex sessions", defaultPath: `codex-sessions-${new Date().toISOString().slice(0, 10)}.json`, filters: [{ name: "JSON", extensions: ["json"] }] });
   if (canceled || !filePath) return { cancelled: true };
-  await writeSecretJson(filePath, { version: 1, accounts: storage.accounts, activeIndex: storage.activeIndex });
+  const accounts = storage.accounts.map(({ savedLogin, ...account }) => account);
+  await writeSecretJson(filePath, { version: 1, accounts, activeIndex: storage.activeIndex });
   return { cancelled: false, count: storage.accounts.length };
 });
 ipcMain.handle("accounts:import", async () => {

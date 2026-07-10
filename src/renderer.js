@@ -54,12 +54,17 @@ function render(data) {
   body.innerHTML = accounts.map((account) => {
     const [tone, status] = statusFor(account);
     const displayName = account.email || account.label;
+    const savedLoginActions = account.hasSavedLogin
+      ? `<button class="button compact secondary" data-relogin="${account.index}" title="Sign in again with saved credentials">Re-login</button><button class="button compact secondary" data-copy="email" data-index="${account.index}" title="Copy email">Email</button><button class="button compact secondary" data-copy="password" data-index="${account.index}" title="Copy password">Pass</button><button class="button compact secondary" data-copy="totp" data-index="${account.index}" title="Copy current 2FA code">2FA</button>`
+      : `<button class="button compact secondary" disabled title="Login details were not saved for this account">Re-login</button>`;
+    const switchLabel = account.current ? "Đang chọn" : "Switch";
+    const deleteButton = account.current ? "" : `<button class="icon-button" data-delete="${account.index}" aria-label="Remove ${escapeHtml(displayName)}" title="Remove account">×</button>`;
     return `<tr>
       <td><div class="account" title="${escapeHtml(displayName)}"><span class="account-name">${escapeHtml(displayName)}${account.current ? '<span class="current-pill">CURRENT</span>' : ""}</span></div></td>
       <td><span class="status ${tone}"><i class="dot"></i>${escapeHtml(status)}</span></td>
       <td>${quotaHtml(account.quota, "primary")}</td>
       <td>${quotaHtml(account.quota, "secondary")}</td>
-      <td><div class="row-actions"><button class="button compact ${account.current ? "secondary" : "primary"}" data-switch="${account.index}" ${account.current ? "disabled" : ""}>${account.current ? "Đang chọn" : "Switch"}</button>${account.current ? "" : `<button class="icon-button" data-delete="${account.index}" aria-label="Remove ${escapeHtml(displayName)}" title="Remove account">×</button>`}</div></td>
+      <td><div class="row-actions"><button class="button compact ${account.current ? "secondary" : "primary"}" data-switch="${account.index}" ${account.current ? "disabled" : ""}>${switchLabel}</button>${savedLoginActions}${deleteButton}</div></td>
     </tr>`;
   }).join("");
   emptyState.hidden = accounts.length > 0;
@@ -111,18 +116,34 @@ async function run(action, successMessage) {
     if (successMessage) showToast(successMessage, "success");
     return result;
   } catch (error) {
-    const message = error?.message || String(error);
-    showToast(message, "error");
+    showToast(error?.message || String(error), "error");
   } finally {
     setBusy(false);
   }
 }
 
-async function handleLogin() {
+async function runLogin(action) {
   if (loginInProgress) {
     await window.codexAuth.cancelLogin();
     return;
   }
+  loginInProgress = true;
+  loginButton.textContent = "Cancel login";
+  setBusy(true);
+  try {
+    const result = await action();
+    if (result?.dashboard) render(result.dashboard);
+    showToast("Đăng nhập thành công.", "success");
+  } catch (error) {
+    showToast(error?.message || String(error), "error");
+  } finally {
+    loginInProgress = false;
+    loginButton.textContent = "+ Login account";
+    setBusy(false);
+  }
+}
+
+async function handleLogin() {
   const rawCredentials = await promptLoginCredentials();
   if (!rawCredentials) return;
   let credentials;
@@ -132,21 +153,7 @@ async function handleLogin() {
     showToast(error?.message || String(error), "error");
     return;
   }
-  loginInProgress = true;
-  loginButton.textContent = "Cancel login";
-  setBusy(true);
-  try {
-    const result = await window.codexAuth.login(credentials);
-    if (result?.dashboard) render(result.dashboard);
-    showToast("Đăng nhập thành công.", "success");
-  } catch (error) {
-    const message = error?.message || String(error);
-    showToast(message, "error");
-  } finally {
-    loginInProgress = false;
-    loginButton.textContent = "+ Login account";
-    setBusy(false);
-  }
+  await runLogin(() => window.codexAuth.login(credentials));
 }
 
 loginButton.addEventListener("click", handleLogin);
@@ -164,21 +171,34 @@ async function refreshQuotaInBackground() {
     // Keep the last known quota visible; the next 5-minute pass will retry.
   }
 }
+
 $("#exportButton").addEventListener("click", async () => {
   const approved = await confirmAction("Export sessions?", "File export có thể đăng nhập các account này trên thiết bị khác. Chỉ lưu và chuyển qua kênh bạn tin cậy.");
   if (!approved) return;
-  const result = await run(() => window.codexAuth.exportSessions(), "Đã export sessions.");
+  await run(() => window.codexAuth.exportSessions(), "Đã export sessions.");
 });
+
 $("#importButton").addEventListener("click", async () => {
   const approved = await confirmAction("Import sessions?", "Chỉ import file do bạn export. Account trùng sẽ được bỏ qua; account hiện tại được giữ nguyên.");
   if (!approved) return;
-  const result = await run(() => window.codexAuth.importSessions(), "Đã import sessions.");
+  await run(() => window.codexAuth.importSessions(), "Đã import sessions.");
 });
+
 body.addEventListener("click", async (event) => {
-  const button = event.target.closest("[data-switch], [data-delete]");
+  const button = event.target.closest("[data-switch], [data-delete], [data-relogin], [data-copy]");
   if (!button) return;
-  const index = Number(button.dataset.switch ?? button.dataset.delete);
+  const index = Number(button.dataset.switch ?? button.dataset.delete ?? button.dataset.relogin ?? button.dataset.index);
   const account = dashboard.accounts.find((item) => item.index === index);
+  if (button.dataset.copy) {
+    const field = button.dataset.copy;
+    const label = { email: "Email", password: "Password", totp: "2FA code" }[field] || "Value";
+    await run(() => window.codexAuth.copyLogin(index, field), `${label} copied.`);
+    return;
+  }
+  if (button.dataset.relogin !== undefined) {
+    await runLogin(() => window.codexAuth.relogin(index));
+    return;
+  }
   if (button.dataset.delete !== undefined) {
     const approved = await confirmAction("Remove account?", `Session của ${account?.email || account?.label || `account ${index + 1}`} sẽ bị xóa khỏi máy này.`);
     if (approved) await run(() => window.codexAuth.deleteAccount(index), "Đã xóa account.");
@@ -187,6 +207,7 @@ body.addEventListener("click", async (event) => {
   const approved = await confirmAction("Switch account?", `Codex sẽ đóng và mở lại với ${account?.email || account?.label || `account ${index + 1}`}.`);
   if (approved) await run(() => window.codexAuth.switchAccount(index), "Đã switch account và mở lại Codex.");
 });
+
 async function startDashboard() {
   await run(() => window.codexAuth.load(), "");
   window.setInterval(refreshQuotaInBackground, AUTO_REFRESH_MS);

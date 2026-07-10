@@ -16,7 +16,7 @@ h1 { margin: 0; font-size: 25px; letter-spacing: -.035em; }
 .button { border: 1px solid transparent; border-radius: 8px; padding: 10px 14px; cursor: pointer; font-weight: 700; transition: transform .15s ease, background .15s ease, opacity .15s ease; }
 .button:hover { transform: translateY(-1px); }
 .button:disabled { cursor: wait; opacity: .55; transform: none; }
-.row-actions { display: flex; justify-content: flex-end; gap: 7px; }.icon-button { width: 29px; height: 29px; border: 1px solid #5b343d; border-radius: 7px; background: #2c1a20; color: #ec8994; cursor: pointer; font-size: 20px; line-height: 1; }.icon-button:hover { background: #48232d; }
+.row-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }.icon-button { width: 29px; height: 29px; border: 1px solid #5b343d; border-radius: 7px; background: #2c1a20; color: #ec8994; cursor: pointer; font-size: 20px; line-height: 1; }.icon-button:hover { background: #48232d; }
 .primary { background: #55a5ff; color: #071320; }
 .primary:hover { background: #7bbaff; }
 .secondary { color: #d9e4f1; background: #1c2531; border-color: #344357; }
@@ -27,8 +27,8 @@ h1 { margin: 0; font-size: 25px; letter-spacing: -.035em; }
 .summary { color: #9aaabd; font-size: 13px; }
 .table-card { overflow: hidden; border: 1px solid #293546; border-radius: 12px; background: rgba(20, 27, 37, .93); box-shadow: 0 18px 48px rgba(0,0,0,.18); }
 .table-wrap { overflow-x: auto; }
-table { width: 100%; min-width: 760px; table-layout: fixed; border-collapse: collapse; }
-.account-column { width: 30%; }.status-column { width: 15%; }.quota-column { width: 21%; }.action-column { width: 13%; }
+table { width: 100%; min-width: 940px; table-layout: fixed; border-collapse: collapse; }
+.account-column { width: 24%; }.status-column { width: 13%; }.quota-column { width: 19%; }.action-column { width: 25%; }
 th, td { padding: 14px 16px; text-align: left; border-bottom: 1px solid #263344; font-size: 13px; vertical-align: middle; }
 th { color: #8293a8; font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; background: rgba(15,22,31,.7); }
 tbody tr:last-child td { border-bottom: 0; }
