@@ -213,6 +213,32 @@ async function fetchUsage(account) {
   }
 }
 
+function quotaDistance(first, second) {
+  if (!first || !second) return Number.POSITIVE_INFINITY;
+  return Math.abs(first.primary.usedPercent - second.primary.usedPercent) +
+    Math.abs(first.secondary.usedPercent - second.secondary.usedPercent);
+}
+
+function cacheIsRecent(quota) {
+  return Number.isFinite(quota?.updatedAt) && Date.now() - quota.updatedAt < 10 * 60_000;
+}
+
+async function fetchStableUsage(account, previous) {
+  const first = await fetchUsage(account);
+  // Normal changes, or a stale/missing cache, need no second request.
+  if (!cacheIsRecent(previous) || quotaDistance(first, previous) < 15) return first;
+
+  // The usage endpoint occasionally serves a transient, mismatched window.
+  // Confirm a large jump before replacing a fresh local measurement.
+  await new Promise((resolve) => setTimeout(resolve, 350));
+  const second = await fetchUsage(account);
+  if (quotaDistance(first, second) < 5 || quotaDistance(previous, second) < 5) return second;
+
+  const error = new Error("Quota response was inconsistent; keeping the last verified value.");
+  error.keepCache = true;
+  throw error;
+}
+
 async function loadQuotaCache() {
   return readJson(QUOTA_PATH, { version: 1, byAccountId: {}, byEmail: {} });
 }
@@ -230,15 +256,18 @@ async function runUsageQuotaRefresh() {
   const errors = [];
   for (const [index, account] of storage.accounts.entries()) {
     try {
-      const quota = await fetchUsage(account);
+      const previous = quotaForAccount(account, cache);
+      const quota = await fetchStableUsage(account, previous);
       if (account.accountId) cache.byAccountId[account.accountId] = quota;
       if (account.email) cache.byEmail[account.email] = quota;
     } catch (error) {
       errors.push(`Account ${index + 1}: ${error instanceof Error ? error.message : String(error)}`);
       // Never render an old value as though it were a fresh quota snapshot.
       // A failed check is clearer as “not checked” than a misleading cache row.
-      if (account.accountId) delete cache.byAccountId[account.accountId];
-      if (account.email) delete cache.byEmail[account.email];
+      if (!error?.keepCache) {
+        if (account.accountId) delete cache.byAccountId[account.accountId];
+        if (account.email) delete cache.byEmail[account.email];
+      }
     }
   }
   await writeSecretJson(ACCOUNTS_PATH, storage);
