@@ -1,13 +1,11 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
-import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import http from "node:http";
-import { promisify } from "node:util";
 import { dirname, join } from "node:path";
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
+import { restartCodex } from "./codex-process.js";
 
-const execFileAsync = promisify(execFile);
 const CODEX_HOME = process.env.CODEX_HOME?.trim() || join(homedir(), ".codex");
 const APP_DIR = join(CODEX_HOME, "multi-auth-desktop");
 const ACCOUNTS_PATH = join(APP_DIR, "accounts.json");
@@ -425,14 +423,6 @@ async function startBrowserLogin() {
   } finally {
     callback.close();
     pendingLogin = null;
-  }
-}
-
-async function restartCodex() {
-  if (process.platform === "darwin") {
-    await execFileAsync("osascript", ["-e", 'tell application "Codex" to quit']).catch(() => undefined);
-    await new Promise((resolve) => setTimeout(resolve, 700));
-    await execFileAsync("open", ["-a", "Codex"]);
   }
 }
 

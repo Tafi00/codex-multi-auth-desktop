@@ -4,7 +4,7 @@
 
 - Đăng nhập account mới bằng browser OAuth (không nhập password vào app).
 - Xem danh sách account và quota primary/secondary của từng account.
-- Switch thủ công một account, sau đó đóng/mở Codex để nạp auth state mới.
+- Switch thủ công một account, sau đó tự động đóng/mở Codex để nạp auth state mới trên macOS và Windows.
 - Export/import toàn bộ session giữa các thiết bị bằng file JSON.
 
 ## Chạy local
