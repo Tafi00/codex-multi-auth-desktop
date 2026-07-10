@@ -72,6 +72,7 @@ function normalizeAccount(account) {
     id: typeof account.id === "string" ? account.id : randomBytes(12).toString("hex"),
     email: typeof account.email === "string" ? account.email.trim().toLowerCase() : null,
     accountId: typeof account.accountId === "string" ? account.accountId : null,
+    usageAccountId: typeof account.usageAccountId === "string" ? account.usageAccountId : null,
     refreshToken: account.refreshToken,
     accessToken: typeof account.accessToken === "string" ? account.accessToken : null,
     idToken: typeof account.idToken === "string" ? account.idToken : null,
@@ -188,6 +189,8 @@ function extractUsageQuota(data, now) {
   if (!primary || !secondary) throw new Error("Usage response did not include 5 hour and Weekly windows.");
   return {
     updatedAt: now,
+    sourceAccountId: typeof data?.account_id === "string" ? data.account_id : null,
+    sourceEmail: typeof data?.email === "string" ? data.email.trim().toLowerCase() : null,
     primary: normalizeUsageWindow(primary),
     secondary: normalizeUsageWindow(secondary),
   };
@@ -202,12 +205,22 @@ async function fetchUsage(account) {
       headers: {
         Authorization: `Bearer ${accessToken}`,
         Accept: "application/json",
-        ...(account.accountId ? { "ChatGPT-Account-ID": account.accountId } : {}),
+        ...(account.usageAccountId || account.accountId
+          ? { "ChatGPT-Account-ID": account.usageAccountId || account.accountId }
+          : {}),
       },
       signal: controller.signal,
     });
     if (!response.ok) throw new Error(`Usage request returned ${response.status}.`);
-    return extractUsageQuota(await response.json(), Date.now());
+    const quota = extractUsageQuota(await response.json(), Date.now());
+    if (account.email && quota.sourceEmail && account.email !== quota.sourceEmail) {
+      throw new Error("Usage response identity did not match this account.");
+    }
+    if (account.usageAccountId && quota.sourceAccountId && account.usageAccountId !== quota.sourceAccountId) {
+      throw new Error("Usage response account ID did not match the verified session.");
+    }
+    if (!account.usageAccountId && quota.sourceAccountId) account.usageAccountId = quota.sourceAccountId;
+    return quota;
   } finally {
     clearTimeout(timeout);
   }
@@ -240,33 +253,30 @@ async function fetchStableUsage(account, previous) {
 }
 
 async function loadQuotaCache() {
-  return readJson(QUOTA_PATH, { version: 1, byAccountId: {}, byEmail: {} });
+  return readJson(QUOTA_PATH, { version: 2, byLocalId: {} });
 }
 
 function quotaForAccount(account, cache) {
-  return (account.accountId && cache.byAccountId?.[account.accountId]) ||
-    (account.email && cache.byEmail?.[account.email]) || null;
+  return account.id ? cache.byLocalId?.[account.id] ?? null : null;
 }
 
 async function runUsageQuotaRefresh() {
   const storage = await loadStorage();
   const cache = await loadQuotaCache();
-  cache.byAccountId ??= {};
-  cache.byEmail ??= {};
+  cache.version = 2;
+  cache.byLocalId ??= {};
   const errors = [];
   for (const [index, account] of storage.accounts.entries()) {
     try {
       const previous = quotaForAccount(account, cache);
       const quota = await fetchStableUsage(account, previous);
-      if (account.accountId) cache.byAccountId[account.accountId] = quota;
-      if (account.email) cache.byEmail[account.email] = quota;
+      cache.byLocalId[account.id] = quota;
     } catch (error) {
       errors.push(`Account ${index + 1}: ${error instanceof Error ? error.message : String(error)}`);
       // Never render an old value as though it were a fresh quota snapshot.
       // A failed check is clearer as “not checked” than a misleading cache row.
       if (!error?.keepCache) {
-        if (account.accountId) delete cache.byAccountId[account.accountId];
-        if (account.email) delete cache.byEmail[account.email];
+        delete cache.byLocalId[account.id];
       }
     }
   }
