@@ -404,6 +404,18 @@ function buildAutofillScript(selector, value) {
   })()`;
 }
 
+function buildConsentScript() {
+  return `(() => {
+    if (!document.body.innerText.includes("Sign in to Codex with ChatGPT")) return false;
+    const submit = [...document.querySelectorAll("form button")].find((button) =>
+      !button.disabled && button.textContent.trim() === "Continue",
+    );
+    if (!submit) return false;
+    submit.click();
+    return true;
+  })()`;
+}
+
 function createOAuthLoginWindow(url, automation, callback) {
   const loginWindow = new BrowserWindow({
     width: 520,
@@ -420,9 +432,10 @@ function createOAuthLoginWindow(url, automation, callback) {
     },
   });
   const steps = [
-    { selector: 'input[type="email"], input[autocomplete="username"]', value: automation.email },
-    { selector: 'input[type="password"][autocomplete="current-password"], input[type="password"]', value: automation.password },
-    ...(automation.totpSecret ? [{ selector: 'input[autocomplete="one-time-code"], input[inputmode="numeric"]', value: () => generateTotpCode(automation.totpSecret) }] : []),
+    { type: "field", selector: 'input[type="email"], input[autocomplete="username"]', value: automation.email },
+    { type: "field", selector: 'input[type="password"][autocomplete="current-password"], input[type="password"]', value: automation.password },
+    ...(automation.totpSecret ? [{ type: "field", selector: 'input[autocomplete="one-time-code"], input[inputmode="numeric"]', value: () => generateTotpCode(automation.totpSecret) }] : []),
+    { type: "consent" },
   ];
   let nextStep = 0;
   let filling = false;
@@ -440,8 +453,10 @@ function createOAuthLoginWindow(url, automation, callback) {
     filling = true;
     try {
       const step = steps[nextStep];
-      const value = typeof step.value === "function" ? step.value() : step.value;
-      const submitted = await loginWindow.webContents.executeJavaScript(buildAutofillScript(step.selector, value), true);
+      const script = step.type === "consent"
+        ? buildConsentScript()
+        : buildAutofillScript(step.selector, typeof step.value === "function" ? step.value() : step.value);
+      const submitted = await loginWindow.webContents.executeJavaScript(script, true);
       if (submitted) nextStep += 1;
     } catch {
       // The auth page may still be changing between redirects; navigation will retry.
@@ -450,9 +465,13 @@ function createOAuthLoginWindow(url, automation, callback) {
     }
   };
 
+  const retryTimer = setInterval(() => { void tryAutofill(); }, 250);
   loginWindow.webContents.on("did-finish-load", tryAutofill);
   loginWindow.webContents.on("did-navigate", tryAutofill);
-  loginWindow.on("closed", callback.close);
+  loginWindow.on("closed", () => {
+    clearInterval(retryTimer);
+    callback.close();
+  });
   loginWindow.loadURL(url);
   return loginWindow;
 }

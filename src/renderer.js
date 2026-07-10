@@ -1,3 +1,5 @@
+import { parseLoginCredentials } from "./login-credentials.js";
+
 const $ = (selector) => document.querySelector(selector);
 const body = $("#accountsBody");
 const emptyState = $("#emptyState");
@@ -92,13 +94,9 @@ function promptLoginCredentials() {
   loginDialog.showModal();
   return new Promise((resolve) => {
     loginDialog.addEventListener("close", () => {
-      const credentials = loginDialog.returnValue === "confirm" ? {
-        email: $("#loginEmail").value,
-        password: $("#loginPassword").value,
-        totpSecret: $("#loginTotpSecret").value,
-      } : null;
+      const rawCredentials = loginDialog.returnValue === "confirm" ? $("#loginCredentials").value : null;
       loginForm.reset();
-      resolve(credentials);
+      resolve(rawCredentials);
     }, { once: true });
   });
 }
@@ -125,8 +123,15 @@ async function handleLogin() {
     await window.codexAuth.cancelLogin();
     return;
   }
-  const credentials = await promptLoginCredentials();
-  if (!credentials) return;
+  const rawCredentials = await promptLoginCredentials();
+  if (!rawCredentials) return;
+  let credentials;
+  try {
+    credentials = parseLoginCredentials(rawCredentials);
+  } catch (error) {
+    showToast(error?.message || String(error), "error");
+    return;
+  }
   loginInProgress = true;
   loginButton.textContent = "Cancel login";
   setBusy(true);
