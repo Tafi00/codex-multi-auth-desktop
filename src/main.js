@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { restartCodex } from "./codex-process.js";
+import { decryptPortableExport, encryptPortableExport } from "./portable-export.js";
 import { generateTotpCode } from "./totp.js";
 
 const CODEX_HOME = process.env.CODEX_HOME?.trim() || join(homedir(), ".codex");
@@ -572,16 +573,37 @@ async function startBrowserLogin(credentials) {
   }
 }
 
-function assertImportShape(value) {
+function assertImportShape(value, { allowSavedLogin = false } = {}) {
   const accounts = Array.isArray(value) ? value : value?.accounts;
   if (!Array.isArray(accounts) || accounts.length > 100) throw new Error("Invalid session export.");
   const normalized = accounts.map((account) => {
     const result = normalizeAccount(account);
-    if (result) result.savedLogin = null;
+    if (result && !allowSavedLogin) result.savedLogin = null;
     return result;
   }).filter(Boolean);
   if (normalized.length !== accounts.length) throw new Error("Every imported account needs a refresh token.");
   return normalized;
+}
+
+function portableAccounts(storage) {
+  return storage.accounts.map((account) => ({
+    ...account,
+    savedLogin: account.savedLogin ? savedLoginFor(account) : null,
+  }));
+}
+
+function secureImportedLogins(accounts) {
+  return accounts.map((account) => {
+    if (!account.savedLogin) return account;
+    return {
+      ...account,
+      savedLogin: {
+        email: account.savedLogin.email,
+        password: encryptLoginSecret(account.savedLogin.password),
+        totpSecret: encryptLoginSecret(account.savedLogin.totpSecret),
+      },
+    };
+  });
 }
 
 ipcMain.handle("accounts:load", async () => {
@@ -643,19 +665,21 @@ ipcMain.handle("accounts:delete", async (_event, index) => {
   await writeSecretJson(ACCOUNTS_PATH, storage);
   return getDashboard();
 });
-ipcMain.handle("accounts:export", async () => {
+ipcMain.handle("accounts:export", async (_event, password) => {
   const storage = await loadStorage();
   if (!storage.accounts.length) throw new Error("There are no accounts to export.");
+  const exportData = encryptPortableExport({ version: 1, accounts: portableAccounts(storage), activeIndex: storage.activeIndex }, password);
   const { filePath, canceled } = await dialog.showSaveDialog(mainWindow, { title: "Export Codex sessions", defaultPath: `codex-sessions-${new Date().toISOString().slice(0, 10)}.json`, filters: [{ name: "JSON", extensions: ["json"] }] });
   if (canceled || !filePath) return { cancelled: true };
-  const accounts = storage.accounts.map(({ savedLogin, ...account }) => account);
-  await writeSecretJson(filePath, { version: 1, accounts, activeIndex: storage.activeIndex });
+  await writeSecretJson(filePath, exportData);
   return { cancelled: false, count: storage.accounts.length };
 });
-ipcMain.handle("accounts:import", async () => {
+ipcMain.handle("accounts:import", async (_event, password) => {
   const { filePaths, canceled } = await dialog.showOpenDialog(mainWindow, { title: "Import Codex sessions", properties: ["openFile"], filters: [{ name: "JSON", extensions: ["json"] }] });
   if (canceled || !filePaths[0]) return { cancelled: true };
-  const incoming = assertImportShape(JSON.parse(await fs.readFile(filePaths[0], "utf8")));
+  const exportData = JSON.parse(await fs.readFile(filePaths[0], "utf8"));
+  const decrypted = exportData.version === 2 && exportData.encrypted ? decryptPortableExport(exportData, password) : exportData;
+  const incoming = secureImportedLogins(assertImportShape(decrypted, { allowSavedLogin: exportData.version === 2 && exportData.encrypted }));
   const storage = await loadStorage();
   const existing = new Set(storage.accounts.map((account) => account.accountId || account.email || account.refreshToken));
   const additions = incoming.filter((account) => !existing.has(account.accountId || account.email || account.refreshToken));

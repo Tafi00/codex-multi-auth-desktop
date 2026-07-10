@@ -8,6 +8,8 @@ const toast = $("#toast");
 const dialog = $("#confirmDialog");
 const loginDialog = $("#loginDialog");
 const loginForm = $("#loginForm");
+const transferDialog = $("#transferDialog");
+const transferForm = $("#transferForm");
 let dashboard = { accounts: [] };
 let busy = false;
 let loginInProgress = false;
@@ -106,6 +108,30 @@ function promptLoginCredentials() {
   });
 }
 
+function promptTransferPassword(mode) {
+  const exporting = mode === "export";
+  const password = $("#transferPassword");
+  const passwordConfirm = $("#transferPasswordConfirm");
+  $("#transferTitle").textContent = exporting ? "Export protected file" : "Import protected file";
+  $("#transferMessage").textContent = exporting
+    ? "Choose a password to encrypt the exported sessions and saved login details. This password cannot be recovered."
+    : "Enter the password used to encrypt this export file.";
+  $("#transferPasswordLabel").textContent = exporting ? "Export password" : "Export password";
+  $("#transferSubmit").textContent = exporting ? "Export encrypted file" : "Import encrypted file";
+  $("#transferConfirmField").hidden = !exporting;
+  password.autocomplete = exporting ? "new-password" : "current-password";
+  passwordConfirm.required = exporting;
+  transferForm.reset();
+  transferDialog.showModal();
+  return new Promise((resolve) => {
+    transferDialog.addEventListener("close", () => {
+      const result = transferDialog.returnValue === "confirm" ? { password: password.value, passwordConfirm: passwordConfirm.value } : null;
+      transferForm.reset();
+      resolve(result);
+    }, { once: true });
+  });
+}
+
 async function run(action, successMessage) {
   if (busy) return;
   setBusy(true);
@@ -175,13 +201,21 @@ async function refreshQuotaInBackground() {
 $("#exportButton").addEventListener("click", async () => {
   const approved = await confirmAction("Export sessions?", "File export có thể đăng nhập các account này trên thiết bị khác. Chỉ lưu và chuyển qua kênh bạn tin cậy.");
   if (!approved) return;
-  await run(() => window.codexAuth.exportSessions(), "Đã export sessions.");
+  const credentials = await promptTransferPassword("export");
+  if (!credentials) return;
+  if (credentials.password !== credentials.passwordConfirm) {
+    showToast("Export passwords do not match.", "error");
+    return;
+  }
+  await run(() => window.codexAuth.exportSessions(credentials.password), "Đã export sessions.");
 });
 
 $("#importButton").addEventListener("click", async () => {
   const approved = await confirmAction("Import sessions?", "Chỉ import file do bạn export. Account trùng sẽ được bỏ qua; account hiện tại được giữ nguyên.");
   if (!approved) return;
-  await run(() => window.codexAuth.importSessions(), "Đã import sessions.");
+  const credentials = await promptTransferPassword("import");
+  if (!credentials) return;
+  await run(() => window.codexAuth.importSessions(credentials.password), "Đã import sessions.");
 });
 
 body.addEventListener("click", async (event) => {

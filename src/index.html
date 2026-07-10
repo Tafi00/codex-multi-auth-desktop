@@ -73,7 +73,7 @@
       <form method="dialog" class="dialog-content" id="loginForm">
         <p class="eyebrow">LOGIN ACCOUNT</p>
         <h2>Sign in to Codex</h2>
-        <p>Nhập <code>email|password|2FA secret</code>. 2FA secret là tuỳ chọn; thông tin chỉ dùng trong bộ nhớ và không được lưu vào app.</p>
+        <p>Nhập <code>email|password|2FA secret</code>. 2FA secret là tuỳ chọn; thông tin được mã hóa trong kho bảo mật hệ điều hành để có thể đăng nhập lại.</p>
         <label class="form-field">
           <span>Login details</span>
           <input id="loginCredentials" name="credentials" type="password" autocomplete="off" spellcheck="false" placeholder="email|password|2FA secret" required />
@@ -81,6 +81,26 @@
         <div class="dialog-actions">
           <button class="button secondary" value="cancel" formnovalidate>Cancel</button>
           <button class="button primary" value="confirm">Open browser &amp; sign in</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="transferDialog">
+      <form method="dialog" class="dialog-content" id="transferForm">
+        <p class="eyebrow" id="transferEyebrow">SECURE TRANSFER</p>
+        <h2 id="transferTitle">Export protected file</h2>
+        <p id="transferMessage"></p>
+        <label class="form-field">
+          <span id="transferPasswordLabel">Export password</span>
+          <input id="transferPassword" name="password" type="password" autocomplete="new-password" minlength="8" required />
+        </label>
+        <label class="form-field" id="transferConfirmField">
+          <span>Confirm password</span>
+          <input id="transferPasswordConfirm" name="passwordConfirm" type="password" autocomplete="new-password" minlength="8" />
+        </label>
+        <div class="dialog-actions">
+          <button class="button secondary" value="cancel" formnovalidate>Cancel</button>
+          <button class="button primary" id="transferSubmit" value="confirm">Export encrypted file</button>
         </div>
       </form>
     </dialog>

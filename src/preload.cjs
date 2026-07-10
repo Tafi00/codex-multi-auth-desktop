@@ -9,8 +9,8 @@ contextBridge.exposeInMainWorld("codexAuth", {
   relogin: (index) => ipcRenderer.invoke("accounts:relogin", index),
   copyLogin: (index, field) => ipcRenderer.invoke("accounts:copy-login", index, field),
   deleteAccount: (index) => ipcRenderer.invoke("accounts:delete", index),
-  exportSessions: () => ipcRenderer.invoke("accounts:export"),
-  importSessions: () => ipcRenderer.invoke("accounts:import"),
+  exportSessions: (password) => ipcRenderer.invoke("accounts:export", password),
+  importSessions: (password) => ipcRenderer.invoke("accounts:import", password),
   onLog: (listener) => {
     const callback = (_event, entry) => listener(entry);
     ipcRenderer.on("manager:log", callback);
