@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+    <title>Codex Multi Auth</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div>
+          <h1>Codex accounts</h1>
+        </div>
+        <div class="header-actions">
+          <button class="button secondary" id="importButton">Import sessions</button>
+          <button class="button secondary" id="exportButton">Export sessions</button>
+          <button class="button primary" id="loginButton">+ Login account</button>
+        </div>
+      </header>
+
+      <section class="toolbar">
+        <div class="summary" id="summary">Đang tải danh sách account…</div>
+        <div class="toolbar-actions">
+          <button class="button compact secondary" id="refreshButton">Refresh quota</button>
+        </div>
+      </section>
+
+      <section class="table-card">
+        <div class="table-wrap">
+          <table>
+            <colgroup>
+              <col class="account-column" />
+              <col class="status-column" />
+              <col class="quota-column" />
+              <col class="quota-column" />
+              <col class="action-column" />
+            </colgroup>
+            <thead>
+              <tr>
+                <th>Account</th>
+                <th>Trạng thái</th>
+                <th>5 hour</th>
+                <th>Weekly</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="accountsBody"></tbody>
+          </table>
+        </div>
+        <div class="empty-state" id="emptyState" hidden>
+          <h2>Chưa có account nào</h2>
+          <p>Nhấn <strong>Login account</strong> để đăng nhập account đầu tiên.</p>
+        </div>
+      </section>
+
+    </main>
+
+    <dialog id="confirmDialog">
+      <form method="dialog" class="dialog-content">
+        <p class="eyebrow">XÁC NHẬN</p>
+        <h2 id="dialogTitle">Xác nhận</h2>
+        <p id="dialogMessage"></p>
+        <div class="dialog-actions">
+          <button class="button secondary" value="cancel">Hủy</button>
+          <button class="button danger" id="dialogConfirm" value="confirm">Tiếp tục</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div class="toast" id="toast" role="status" hidden></div>
+    <script type="module" src="renderer.js"></script>
+  </body>
+</html>

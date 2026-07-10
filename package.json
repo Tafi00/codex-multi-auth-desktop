@@ -1,0 +1,42 @@
+{
+  "name": "codex-multi-auth-desktop",
+  "version": "0.1.0",
+  "description": "A simple desktop manager for Codex multi-account sessions.",
+  "author": "Local",
+  "type": "module",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "check": "node --check src/main.js && node --check src/preload.cjs && node --check src/renderer.js",
+    "package:mac": "electron-builder --mac",
+    "package:win": "electron-builder --win",
+    "package:linux": "electron-builder --linux"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "electron": "^39.2.7",
+    "electron-builder": "^26.8.1"
+  },
+  "build": {
+    "appId": "com.local.codexmultiauth",
+    "productName": "Codex Multi Auth",
+    "directories": {
+      "output": "outputs"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": ["dmg"]
+    },
+    "win": {
+      "target": ["nsis"]
+    },
+    "linux": {
+      "target": ["AppImage"]
+    }
+  }
+}
