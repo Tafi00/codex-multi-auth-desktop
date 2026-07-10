@@ -260,13 +260,16 @@ function quotaForAccount(account, cache) {
   return account.id ? cache.byLocalId?.[account.id] ?? null : null;
 }
 
-async function runUsageQuotaRefresh() {
+async function runUsageQuotaRefresh(targetAccountIds = null) {
   const storage = await loadStorage();
   const cache = await loadQuotaCache();
   cache.version = 2;
   cache.byLocalId ??= {};
   const errors = [];
-  for (const [index, account] of storage.accounts.entries()) {
+  const targets = storage.accounts
+    .map((account, index) => ({ account, index }))
+    .filter(({ account }) => !targetAccountIds || targetAccountIds.has(account.id));
+  for (const { index, account } of targets) {
     try {
       const previous = quotaForAccount(account, cache);
       const quota = await fetchStableUsage(account, previous);
@@ -285,9 +288,9 @@ async function runUsageQuotaRefresh() {
   return errors;
 }
 
-async function refreshUsageQuota() {
+async function refreshUsageQuota(targetAccountIds = null) {
   if (quotaRefreshTask) return quotaRefreshTask;
-  quotaRefreshTask = runUsageQuotaRefresh().finally(() => { quotaRefreshTask = null; });
+  quotaRefreshTask = runUsageQuotaRefresh(targetAccountIds).finally(() => { quotaRefreshTask = null; });
   return quotaRefreshTask;
 }
 
@@ -412,9 +415,12 @@ async function startBrowserLogin() {
       addedAt: existingIndex >= 0 ? storage.accounts[existingIndex].addedAt : Date.now(),
     };
     if (existingIndex >= 0) storage.accounts[existingIndex] = account;
-    else { storage.accounts.push(account); storage.activeIndex = storage.accounts.length - 1; }
+    else storage.accounts.push(account);
+    storage.activeIndex = existingIndex >= 0 ? existingIndex : storage.accounts.length - 1;
     await syncAccountToCodex(account);
     await writeSecretJson(ACCOUNTS_PATH, storage);
+    // Login is complete only after the new active account has a fresh quota row.
+    await refreshUsageQuota(new Set([account.id])).catch(() => undefined);
     return { dashboard: await getDashboard() };
   } finally {
     callback.close();
