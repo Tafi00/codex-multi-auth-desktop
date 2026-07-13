@@ -7,6 +7,7 @@ import { homedir } from "node:os";
 import { restartCodex } from "./codex-process.js";
 import { decryptPortableExport, encryptPortableExport } from "./portable-export.js";
 import { generateTotpCode } from "./totp.js";
+import { extractUsageQuota, quotaDistance } from "./usage-quota.js";
 
 const CODEX_HOME = process.env.CODEX_HOME?.trim() || join(homedir(), ".codex");
 const APP_DIR = join(CODEX_HOME, "multi-auth-desktop");
@@ -170,39 +171,6 @@ async function usableAccessToken(account) {
   return refreshAccount(account);
 }
 
-function finiteNumber(value, fallback = 0) {
-  const number = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(number) ? number : fallback;
-}
-
-function timestampMs(value) {
-  if (typeof value === "number" && Number.isFinite(value)) return value < 1e12 ? value * 1000 : value;
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? parsed : undefined;
-}
-
-function normalizeUsageWindow(window) {
-  return {
-    usedPercent: Math.max(0, Math.min(100, finiteNumber(window?.used_percent ?? window?.percent_used))),
-    windowMinutes: finiteNumber(window?.window_minutes ?? window?.windowMinutes),
-    resetAtMs: timestampMs(window?.reset_at ?? window?.resets_at ?? window?.resetAt),
-  };
-}
-
-function extractUsageQuota(data, now) {
-  const rateLimit = data?.rate_limit ?? data?.rate_limits ?? data?.rate_limits_by_limit_id?.codex ?? data;
-  const primary = rateLimit?.primary_window ?? rateLimit?.primary;
-  const secondary = rateLimit?.secondary_window ?? rateLimit?.secondary;
-  if (!primary || !secondary) throw new Error("Usage response did not include 5 hour and Weekly windows.");
-  return {
-    updatedAt: now,
-    sourceAccountId: typeof data?.account_id === "string" ? data.account_id : null,
-    sourceEmail: typeof data?.email === "string" ? data.email.trim().toLowerCase() : null,
-    primary: normalizeUsageWindow(primary),
-    secondary: normalizeUsageWindow(secondary),
-  };
-}
-
 async function fetchUsage(account) {
   const accessToken = await usableAccessToken(account);
   const controller = new AbortController();
@@ -233,12 +201,6 @@ async function fetchUsage(account) {
   }
 }
 
-function quotaDistance(first, second) {
-  if (!first || !second) return Number.POSITIVE_INFINITY;
-  return Math.abs(first.primary.usedPercent - second.primary.usedPercent) +
-    Math.abs(first.secondary.usedPercent - second.secondary.usedPercent);
-}
-
 function cacheIsRecent(quota) {
   return Number.isFinite(quota?.updatedAt) && Date.now() - quota.updatedAt < 10 * 60_000;
 }
@@ -260,7 +222,7 @@ async function fetchStableUsage(account, previous) {
 }
 
 async function loadQuotaCache() {
-  return readJson(QUOTA_PATH, { version: 2, byLocalId: {} });
+  return readJson(QUOTA_PATH, { version: 3, byLocalId: {} });
 }
 
 function quotaForAccount(account, cache) {
@@ -270,7 +232,7 @@ function quotaForAccount(account, cache) {
 async function runUsageQuotaRefresh(targetAccountIds = null) {
   const storage = await loadStorage();
   const cache = await loadQuotaCache();
-  cache.version = 2;
+  cache.version = 3;
   cache.byLocalId ??= {};
   const errors = [];
   const targets = storage.accounts
@@ -306,7 +268,9 @@ async function getDashboard() {
   const cache = await loadQuotaCache();
   const accounts = storage.accounts.map((account, index) => {
     const quota = quotaForAccount(account, cache);
-    const primaryRemaining = quota ? 100 - quota.primary.usedPercent : null;
+    const windowExhausted = [quota?.primary, quota?.secondary]
+      .filter(Boolean)
+      .some((window) => window.usedPercent >= 100);
     return {
       index,
       email: account.email,
@@ -314,12 +278,14 @@ async function getDashboard() {
       current: index === storage.activeIndex,
       enabled: true,
       hasSavedLogin: Boolean(account.savedLogin?.password),
-      markers: primaryRemaining === 0 ? ["quota-exhausted"] : [],
+      markers: quota && (quota.limitReached === true || quota.allowed === false || windowExhausted)
+        ? ["quota-exhausted"]
+        : [],
       quota: quota ? {
-        primaryUsedPercent: quota.primary.usedPercent,
-        primaryResetAtMs: quota.primary.resetAtMs,
-        secondaryUsedPercent: quota.secondary.usedPercent,
-        secondaryResetAtMs: quota.secondary.resetAtMs,
+        primaryUsedPercent: quota.primary?.usedPercent ?? null,
+        primaryResetAtMs: quota.primary?.resetAtMs ?? null,
+        secondaryUsedPercent: quota.secondary?.usedPercent ?? null,
+        secondaryResetAtMs: quota.secondary?.resetAtMs ?? null,
         updatedAt: quota.updatedAt,
       } : null,
     };

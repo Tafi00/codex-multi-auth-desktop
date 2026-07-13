@@ -35,7 +35,8 @@ function resetLabel(timestamp) {
 function quotaHtml(quota, type) {
   const used = type === "primary" ? quota?.primaryUsedPercent : quota?.secondaryUsedPercent;
   const reset = type === "primary" ? quota?.primaryResetAtMs : quota?.secondaryResetAtMs;
-  if (used === null || used === undefined) return '<span class="muted">Chưa kiểm tra</span>';
+  if (!quota) return '<span class="muted">Chưa kiểm tra</span>';
+  if (used === null || used === undefined) return '<span class="muted">Unlimited</span>';
   const usedPercent = Math.max(0, Math.min(100, used));
   const remainingPercent = 100 - usedPercent;
   const tone = remainingPercent < 30 ? "danger" : remainingPercent <= 70 ? "warning" : "";
