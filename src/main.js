@@ -488,6 +488,9 @@ function createOAuthLoginWindow(url, automation, callback, smsSession = null) {
         try {
           values.phoneNumber = await resolvePhoneNumber(state);
           values.smsCode = await resolveSmsCode(state);
+          // resolveSmsCode can time out during this same tick. Carry the new
+          // rotate state into the script so it cannot click Continue first.
+          if (rotatePhone && !values.smsCode) values.rotatePhone = true;
         } catch (error) {
           stopPhoneAutomation(error instanceof Error ? error.message : String(error));
           return;
@@ -512,7 +515,13 @@ function createOAuthLoginWindow(url, automation, callback, smsSession = null) {
         true,
       );
       if (result?.needsPhoneReset) {
-        stopPhoneAutomation("the page offers no way back to phone entry. Finish this login by hand.");
+        if (loginWindow.webContents.canGoBack()) {
+          completedActionKeys.clear();
+          loginWindow.webContents.goBack();
+          sendLog("Returning to the phone form to rent another number.");
+        } else {
+          stopPhoneAutomation("the page offers no way back to phone entry. Finish this login by hand.");
+        }
         return;
       }
       if (result?.acted && result.key) {
@@ -521,7 +530,7 @@ function createOAuthLoginWindow(url, automation, callback, smsSession = null) {
           phoneSession?.markSubmitted();
           sendLog(`Submitted ${values.phoneNumber} to OpenAI.`);
         }
-        if (result.action === "rotate-phone") rotatePhone = false;
+        if (result.action === "rotate-phone" || result.action === "rotate-phone-ready") rotatePhone = false;
         if (result.action === "sms-code") phoneSession?.markCodeSubmitted();
         const details = result.url
           ? ` (${result.url}; smsSelected=${String(result.smsSelected ?? "n/a")})`

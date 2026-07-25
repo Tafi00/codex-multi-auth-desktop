@@ -216,11 +216,18 @@ function startAutoRefreshScheduler() {
 
 const smsDialog = $("#smsDialog");
 const smsForm = $("#smsForm");
+const smsCountry = $("#smsCountry");
+const smsCountrySearch = $("#smsCountrySearch");
+const smsCountryCombobox = $("#smsCountryCombobox");
+const smsCountryOptions = $("#smsCountryOptions");
+let smsCountryOffers = [];
+let highlightedCountryIndex = -1;
+let smsCountryQuery = "";
 
 function applySmsSettings(settings) {
   $("#smsEnabled").checked = Boolean(settings.enabled);
-  const countrySelect = $("#smsCountry");
-  countrySelect.replaceChildren(new Option(`Country ID ${settings.country}`, settings.country, true, true));
+  smsCountryOffers = [];
+  setSelectedSmsCountry(settings.country);
   $("#smsApiKey").value = "";
   $("#smsApiKey").placeholder = settings.hasApiKey
     ? "Đã lưu key — để trống nếu không đổi"
@@ -232,29 +239,109 @@ function formatSmsPrice(value) {
   return new Intl.NumberFormat(undefined, { maximumFractionDigits: 4 }).format(value);
 }
 
-async function loadSmsCountryOffers(selectedCountry = $("#smsCountry").value) {
-  const countrySelect = $("#smsCountry");
-  countrySelect.disabled = true;
+function smsCountryLabel(offer) {
+  return offer
+    ? `${offer.name} · ${formatSmsPrice(offer.price)}`
+    : `Country ID ${smsCountry.value}`;
+}
+
+function setSelectedSmsCountry(countryId) {
+  smsCountry.value = String(countryId ?? "");
+  const offer = smsCountryOffers.find((item) => item.id === smsCountry.value);
+  smsCountrySearch.value = smsCountryLabel(offer);
+}
+
+function filteredSmsCountries(query = "") {
+  const normalized = String(query).trim().toLowerCase();
+  if (!normalized) return smsCountryOffers;
+  return smsCountryOffers.filter((offer) =>
+    `${offer.name} ${offer.id} ${formatSmsPrice(offer.price)}`.toLowerCase().includes(normalized)
+  );
+}
+
+function closeSmsCountryDropdown({ restoreSelection = false } = {}) {
+  smsCountryOptions.hidden = true;
+  smsCountrySearch.setAttribute("aria-expanded", "false");
+  smsCountrySearch.removeAttribute("aria-activedescendant");
+  highlightedCountryIndex = -1;
+  smsCountryQuery = "";
+  if (restoreSelection) setSelectedSmsCountry(smsCountry.value);
+}
+
+function renderSmsCountryOptions(query = smsCountryQuery) {
+  smsCountryQuery = query;
+  const offers = filteredSmsCountries(query);
+  highlightedCountryIndex = Math.min(highlightedCountryIndex, offers.length - 1);
+  smsCountryOptions.replaceChildren();
+  if (!offers.length) {
+    const empty = document.createElement("div");
+    empty.className = "country-options-empty";
+    empty.textContent = "Không tìm thấy quốc gia";
+    smsCountryOptions.append(empty);
+  } else {
+    offers.forEach((offer, index) => {
+      const option = document.createElement("button");
+      option.type = "button";
+      option.className = "country-option";
+      option.dataset.countryId = offer.id;
+      option.id = `sms-country-option-${offer.id}`;
+      option.setAttribute("role", "option");
+      option.setAttribute("aria-selected", String(offer.id === smsCountry.value));
+      if (index === highlightedCountryIndex) option.classList.add("highlighted");
+
+      const identity = document.createElement("span");
+      identity.className = "country-option-identity";
+      const name = document.createElement("strong");
+      name.textContent = offer.name;
+      const id = document.createElement("small");
+      id.textContent = `ID ${offer.id}`;
+      identity.append(name, id);
+
+      const details = document.createElement("span");
+      details.className = "country-option-details";
+      const price = document.createElement("strong");
+      price.textContent = formatSmsPrice(offer.price);
+      const stock = document.createElement("small");
+      stock.textContent = `${offer.count} số`;
+      details.append(price, stock);
+      option.append(identity, details);
+      smsCountryOptions.append(option);
+    });
+  }
+  smsCountryOptions.hidden = false;
+  smsCountrySearch.setAttribute("aria-expanded", "true");
+  const highlighted = smsCountryOptions.querySelector(".highlighted");
+  if (highlighted) smsCountrySearch.setAttribute("aria-activedescendant", highlighted.id);
+  else smsCountrySearch.removeAttribute("aria-activedescendant");
+  if (!query && highlightedCountryIndex < 0) {
+    smsCountryOptions.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" });
+  }
+  return offers;
+}
+
+function chooseSmsCountry(countryId) {
+  setSelectedSmsCountry(countryId);
+  closeSmsCountryDropdown();
+  smsCountrySearch.focus();
+}
+
+async function loadSmsCountryOffers(selectedCountry = smsCountry.value) {
+  smsCountrySearch.disabled = true;
+  smsCountrySearch.placeholder = "Đang tải quốc gia và giá…";
   try {
     const { offers } = await window.codexAuth.listSmsCountries({
       apiKey: $("#smsApiKey").value,
     });
-    const selectedOffer = offers.find((offer) => offer.id === selectedCountry);
-    const options = offers.map((offer) => new Option(
-      `${offer.name} — giá ${formatSmsPrice(offer.price)} · còn ${offer.count} số`,
-      offer.id,
-      false,
-      offer.id === selectedCountry,
-    ));
-    if (!selectedOffer && selectedCountry) {
-      options.unshift(new Option(`Country ID ${selectedCountry} — hiện không có số`, selectedCountry, true, true));
-    }
-    countrySelect.replaceChildren(...options);
-    if (!countrySelect.value && options[0]) countrySelect.value = options[0].value;
+    smsCountryOffers = offers;
+    const nextCountry = offers.some((offer) => offer.id === selectedCountry)
+      ? selectedCountry
+      : (selectedCountry || offers[0]?.id || "");
+    setSelectedSmsCountry(nextCountry);
   } catch (error) {
     showToast(error?.message || String(error), "error");
   } finally {
-    countrySelect.disabled = false;
+    smsCountrySearch.disabled = false;
+    smsCountrySearch.placeholder = "Tìm quốc gia…";
   }
 }
 
@@ -262,7 +349,7 @@ function readSmsForm() {
   return {
     enabled: $("#smsEnabled").checked,
     apiKey: $("#smsApiKey").value,
-    country: $("#smsCountry").value,
+    country: smsCountry.value,
   };
 }
 
@@ -287,7 +374,7 @@ async function checkSmsApiKey() {
   try {
     const result = await window.codexAuth.testSmsSettings(readSmsForm());
     balance.textContent = formatSmsPrice(result.balance);
-    void loadSmsCountryOffers($("#smsCountry").value);
+    void loadSmsCountryOffers(smsCountry.value);
   } catch (error) {
     balance.textContent = "Invalid";
     showToast(error?.message || String(error), "error");
@@ -298,7 +385,55 @@ async function checkSmsApiKey() {
 
 $("#smsTestButton").addEventListener("click", checkSmsApiKey);
 
+smsCountrySearch.addEventListener("focus", () => {
+  smsCountrySearch.select();
+  renderSmsCountryOptions("");
+});
+
+smsCountrySearch.addEventListener("click", () => {
+  if (smsCountryOptions.hidden) renderSmsCountryOptions();
+});
+
+smsCountrySearch.addEventListener("input", () => {
+  highlightedCountryIndex = -1;
+  renderSmsCountryOptions(smsCountrySearch.value);
+});
+
+smsCountrySearch.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    closeSmsCountryDropdown({ restoreSelection: true });
+    return;
+  }
+  if (!["ArrowDown", "ArrowUp", "Enter"].includes(event.key)) return;
+  const offers = filteredSmsCountries(smsCountryOptions.hidden ? "" : smsCountryQuery);
+  if (!offers.length) return;
+  event.preventDefault();
+  if (event.key === "Enter") {
+    const offer = offers[Math.max(0, highlightedCountryIndex)];
+    if (offer) chooseSmsCountry(offer.id);
+    return;
+  }
+  const direction = event.key === "ArrowDown" ? 1 : -1;
+  highlightedCountryIndex = (highlightedCountryIndex + direction + offers.length) % offers.length;
+  renderSmsCountryOptions(smsCountryOptions.hidden ? "" : smsCountryQuery);
+  smsCountryOptions.querySelector(".highlighted")?.scrollIntoView({ block: "nearest" });
+});
+
+smsCountryOptions.addEventListener("mousedown", (event) => {
+  event.preventDefault();
+});
+
+smsCountryOptions.addEventListener("click", (event) => {
+  const option = event.target.closest("[data-country-id]");
+  if (option) chooseSmsCountry(option.dataset.countryId);
+});
+
+document.addEventListener("click", (event) => {
+  if (!smsCountryCombobox.contains(event.target)) closeSmsCountryDropdown({ restoreSelection: true });
+});
+
 smsDialog.addEventListener("close", async () => {
+  closeSmsCountryDropdown();
   if (smsDialog.returnValue !== "confirm") return;
   const input = readSmsForm();
   smsForm.reset();

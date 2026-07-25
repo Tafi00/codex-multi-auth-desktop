@@ -99,6 +99,14 @@ export function buildOAuthAutomationScript(automation, values = {}, completedAct
 
     // Swapping a burned number needs the page's own "use another number" exit.
     if (${JSON.stringify(Boolean(values.rotatePhone))}) {
+      const phoneResetField = findVisible("input[type='tel']");
+      if (phoneResetField) {
+        return {
+          acted: true,
+          key: pageBase + "|rotate-phone-ready",
+          action: "rotate-phone-ready",
+        };
+      }
       const rotate = clickables.find((element) => {
         const label = normalize(element.innerText || element.textContent);
         return /(another|different|change|new)/.test(label) && label.includes("phone");

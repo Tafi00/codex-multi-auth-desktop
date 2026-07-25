@@ -105,12 +105,15 @@
             <strong id="smsBalanceValue">—</strong>
           </div>
         </div>
-        <label class="form-field">
-          <span>Quốc gia và giá hiện tại</span>
-          <span class="select-shell">
-            <select id="smsCountry" name="country"></select>
-          </span>
-        </label>
+        <div class="form-field">
+          <label for="smsCountrySearch">Quốc gia và giá hiện tại</label>
+          <div class="country-combobox" id="smsCountryCombobox">
+            <input id="smsCountrySearch" type="text" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="smsCountryOptions" autocomplete="off" spellcheck="false" placeholder="Tìm quốc gia…" />
+            <input id="smsCountry" name="country" type="hidden" />
+            <span class="country-combobox-arrow" aria-hidden="true">▾</span>
+            <div class="country-options" id="smsCountryOptions" role="listbox" hidden></div>
+          </div>
+        </div>
         <div class="dialog-actions">
           <button class="button secondary" value="cancel" formnovalidate>Cancel</button>
           <button class="button primary" value="confirm">Save</button>

@@ -26,7 +26,9 @@ test("embeds credentials as escaped literals", () => {
 });
 
 test("only asks for the rotate action when the caller requests it", () => {
-  assert.match(buildOAuthAutomationScript(automation, { rotatePhone: true }, null), /needsPhoneReset/);
+  const rotateScript = buildOAuthAutomationScript(automation, { rotatePhone: true }, null);
+  assert.match(rotateScript, /needsPhoneReset/);
+  assert.match(rotateScript, /rotate-phone-ready/);
   const script = buildOAuthAutomationScript(automation, {}, null);
   assert.match(script, /if \(false\) \{/);
 });
