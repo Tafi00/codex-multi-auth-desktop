@@ -14,6 +14,7 @@
           <h1>Codex accounts</h1>
         </div>
         <div class="header-actions">
+          <button class="button secondary" id="smsSettingsButton">Phone verification</button>
           <button class="button secondary" id="importButton">Import sessions</button>
           <button class="button secondary" id="exportButton">Export sessions</button>
           <button class="button primary" id="loginButton">+ Login account</button>
@@ -85,22 +86,34 @@
       </form>
     </dialog>
 
-    <dialog id="transferDialog">
-      <form method="dialog" class="dialog-content" id="transferForm">
-        <p class="eyebrow" id="transferEyebrow">SECURE TRANSFER</p>
-        <h2 id="transferTitle">Export protected file</h2>
-        <p id="transferMessage"></p>
-        <label class="form-field">
-          <span id="transferPasswordLabel">Export password</span>
-          <input id="transferPassword" name="password" type="password" autocomplete="new-password" minlength="8" required />
+    <dialog id="smsDialog">
+      <form method="dialog" class="dialog-content" id="smsForm">
+        <p class="eyebrow">PHONE VERIFICATION</p>
+        <h2>HeroSMS numbers</h2>
+        <label class="form-field checkbox-field">
+          <input id="smsEnabled" name="enabled" type="checkbox" />
+          <span>Tự động thuê số khi cần xác minh SMS</span>
         </label>
-        <label class="form-field" id="transferConfirmField">
-          <span>Confirm password</span>
-          <input id="transferPasswordConfirm" name="passwordConfirm" type="password" autocomplete="new-password" minlength="8" />
+        <div class="form-field">
+          <span>API key</span>
+          <div class="input-action-row">
+            <input id="smsApiKey" name="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="Giữ nguyên key đã lưu nếu để trống" />
+            <button class="button secondary compact" id="smsTestButton" type="button">Check API key</button>
+          </div>
+          <div class="balance-row">
+            <span>Balance</span>
+            <strong id="smsBalanceValue">—</strong>
+          </div>
+        </div>
+        <label class="form-field">
+          <span>Quốc gia và giá hiện tại</span>
+          <span class="select-shell">
+            <select id="smsCountry" name="country"></select>
+          </span>
         </label>
         <div class="dialog-actions">
           <button class="button secondary" value="cancel" formnovalidate>Cancel</button>
-          <button class="button primary" id="transferSubmit" value="confirm">Export encrypted file</button>
+          <button class="button primary" value="confirm">Save</button>
         </div>
       </form>
     </dialog>

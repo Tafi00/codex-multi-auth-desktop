@@ -5,18 +5,109 @@ import { restartCodex } from "./codex-process.js";
 
 test("restarts Codex with the macOS application commands", async () => {
   const calls = [];
-  const pauses = [];
+  let running = true;
+  const run = async (...args) => {
+    calls.push(args);
+    if (args[0] === "pgrep") return { stdout: running ? "123\n" : "" };
+    if (args[0] === "osascript") running = false;
+    if (args[0] === "kill" && args[1][0] === "-0" && !running) throw new Error("not running");
+    if (args[0] === "open") running = true;
+  };
   await restartCodex({
     platform: "darwin",
-    run: async (...args) => { calls.push(args); },
-    pause: async (milliseconds) => { pauses.push(milliseconds); },
+    run,
+    pause: async () => undefined,
   });
 
   assert.deepEqual(calls, [
-    ["osascript", ["-e", 'tell application "Codex" to quit']],
+    ["pgrep", ["-f", "(ChatGPT|Codex)\\.app/Contents/MacOS/(ChatGPT|Codex)"]],
+    ["osascript", [
+      "-e",
+      'tell application "System Events" to set frontmost of (first process whose unix id is 123) to true',
+      "-e",
+      'tell application "System Events" to keystroke "q" using command down',
+    ]],
+    ["kill", ["-0", "123"]],
     ["open", ["-a", "Codex"]],
+    ["pgrep", ["-f", "(ChatGPT|Codex)\\.app/Contents/MacOS/(ChatGPT|Codex)"]],
   ]);
-  assert.deepEqual(pauses, [700]);
+});
+
+test("accepts Codex's running-task quit confirmation before terminating it", async () => {
+  const calls = [];
+  let running = true;
+  let checksAfterQuit = 0;
+  const run = async (...args) => {
+    calls.push(args);
+    if (args[0] === "pgrep") {
+      return { stdout: running ? "234\n" : "" };
+    }
+    if (args[0] === "kill" && args[1][0] === "-0") {
+      checksAfterQuit += 1;
+      if (!running) throw new Error("not running");
+    }
+    if (args[0] === "osascript" && args[1].some((value) => value.includes?.('click button "Quit"'))) {
+      running = false;
+    }
+    if (args[0] === "open") running = true;
+  };
+
+  await restartCodex({
+    platform: "darwin",
+    run,
+    pause: async () => undefined,
+  });
+
+  assert.ok(checksAfterQuit > 1);
+  assert.ok(calls.some(([file, args]) => file === "osascript" && args.some((value) => value.includes?.('click button "Quit"'))));
+  assert.ok(!calls.some(([file, args]) => file === "kill" && args[0] === "-15"));
+  assert.ok(!calls.some(([file, args]) => file === "kill" && args[0] === "-9"));
+  const quitIndex = calls.findIndex(([file, args]) => file === "osascript" && args.some((value) => value.includes?.('click button "Quit"')));
+  const openIndex = calls.findIndex(([file]) => file === "open");
+  assert.ok(quitIndex >= 0 && openIndex > quitIndex);
+});
+
+test("uses Cockpit's SIGTERM fallback when the quit confirmation cannot be automated", async () => {
+  const calls = [];
+  let running = true;
+  const run = async (...args) => {
+    calls.push(args);
+    if (args[0] === "pgrep") return { stdout: running ? "235\n" : "" };
+    if (args[0] === "kill" && args[1][0] === "-0" && !running) throw new Error("not running");
+    if (args[0] === "kill" && args[1][0] === "-15") running = false;
+    if (args[0] === "open") running = true;
+  };
+
+  await restartCodex({
+    platform: "darwin",
+    run,
+    pause: async () => undefined,
+  });
+
+  assert.ok(calls.some(([file, args]) => file === "osascript" && args.some((value) => value.includes?.('click button "Quit"'))));
+  assert.ok(calls.some(([file, args]) => file === "kill" && args[0] === "-15"));
+  assert.ok(!calls.some(([file, args]) => file === "kill" && args[0] === "-9"));
+});
+
+test("force kills Codex only when graceful termination also stalls", async () => {
+  const calls = [];
+  let running = true;
+  const run = async (...args) => {
+    calls.push(args);
+    if (args[0] === "pgrep") return { stdout: running ? "345\n" : "" };
+    if (args[0] === "kill" && args[1][0] === "-0" && !running) throw new Error("not running");
+    if (args[0] === "kill" && args[1][0] === "-9") running = false;
+    if (args[0] === "open") running = true;
+  };
+
+  await restartCodex({
+    platform: "darwin",
+    run,
+    pause: async () => undefined,
+  });
+
+  assert.ok(calls.some(([file, args]) => file === "kill" && args[0] === "-15"));
+  assert.ok(calls.some(([file, args]) => file === "kill" && args[0] === "-9"));
 });
 
 test("restarts Codex through PowerShell on Windows", async () => {

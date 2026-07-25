@@ -1,18 +1,38 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, safeStorage } from "electron";
 import { createHash, randomBytes } from "node:crypto";
-import http from "node:http";
 import { dirname, join } from "node:path";
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { restartCodex } from "./codex-process.js";
-import { decryptPortableExport, encryptPortableExport } from "./portable-export.js";
 import { generateTotpCode } from "./totp.js";
+import { buildOAuthAutomationScript, buildPageStateScript } from "./login-automation.js";
+import {
+  createPhoneVerificationSession,
+  hasPhoneNumberError,
+  isAuthenticatorPrompt,
+  isNumberRejection,
+} from "./phone-verification.js";
+import {
+  DEFAULT_SMS_SETTINGS,
+  SMS_SETTINGS_VERSION,
+  createSmsClient,
+  migrateSmsSettings,
+  normalizeSmsSettings,
+} from "./sms-provider.js";
 import { extractUsageQuota, quotaDistance } from "./usage-quota.js";
+import {
+  applyTokenResponse,
+  buildCodexAuthFile,
+  buildUsageHeaders,
+  extractIdentity,
+} from "./codex-auth.js";
+import { startOAuthCallbackServer } from "./oauth-callback.js";
 
 const CODEX_HOME = process.env.CODEX_HOME?.trim() || join(homedir(), ".codex");
 const APP_DIR = join(CODEX_HOME, "multi-auth-desktop");
 const ACCOUNTS_PATH = join(APP_DIR, "accounts.json");
 const QUOTA_PATH = join(APP_DIR, "quota-cache.json");
+const SETTINGS_PATH = join(APP_DIR, "settings.json");
 const AUTH_PATH = join(CODEX_HOME, "auth.json");
 const LEGACY_ACCOUNTS_PATH = join(CODEX_HOME, "multi-auth", "openai-codex-accounts.json");
 const OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -22,6 +42,8 @@ const OAUTH_SCOPE = "openid profile email offline_access";
 let mainWindow;
 let pendingLogin = null;
 let quotaRefreshTask = null;
+const accountRefreshTasks = new Map();
+const QUOTA_REFRESH_CONCURRENCY = 4;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -67,6 +89,13 @@ async function writeSecretJson(path, value) {
   }
 }
 
+function sendLog(message, tone = "") {
+  console.info(`[login] ${message}`);
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("manager:log", { message, tone, at: Date.now() });
+  }
+}
+
 function normalizeAccount(account) {
   if (!account || typeof account.refreshToken !== "string" || !account.refreshToken.trim()) return null;
   return {
@@ -74,6 +103,7 @@ function normalizeAccount(account) {
     email: typeof account.email === "string" ? account.email.trim().toLowerCase() : null,
     accountId: typeof account.accountId === "string" ? account.accountId : null,
     usageAccountId: typeof account.usageAccountId === "string" ? account.usageAccountId : null,
+    planType: typeof account.planType === "string" ? account.planType : null,
     refreshToken: account.refreshToken,
     accessToken: typeof account.accessToken === "string" ? account.accessToken : null,
     idToken: typeof account.idToken === "string" ? account.idToken : null,
@@ -110,58 +140,33 @@ function base64Url(value) {
   return value.toString("base64").replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
 }
 
-function decodeJwt(token) {
-  try {
-    const payload = token.split(".")[1];
-    if (!payload) return {};
-    return JSON.parse(Buffer.from(payload.replaceAll("-", "+").replaceAll("_", "/"), "base64").toString("utf8"));
-  } catch {
-    return {};
-  }
-}
-
-function extractIdentity(accessToken, idToken) {
-  const claims = { ...decodeJwt(accessToken), ...decodeJwt(idToken) };
-  const findId = (value) => {
-    if (!value || typeof value !== "object") return null;
-    for (const [key, candidate] of Object.entries(value)) {
-      if (typeof candidate === "string" && /(?:account|organization|org).*id/i.test(key)) return candidate;
-      if (candidate && typeof candidate === "object") {
-        const nested = findId(candidate);
-        if (nested) return nested;
-      }
-    }
-    return null;
-  };
-  return {
-    email: typeof claims.email === "string" ? claims.email.trim().toLowerCase() : null,
-    accountId: findId(claims),
-  };
-}
-
 async function refreshAccount(account) {
-  const body = new URLSearchParams({
-    grant_type: "refresh_token",
-    client_id: OAUTH_CLIENT_ID,
-    refresh_token: account.refreshToken,
-  });
-  const response = await fetch("https://auth.openai.com/oauth/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body,
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok || typeof data.access_token !== "string" || typeof data.refresh_token !== "string") {
-    throw new Error("Session has expired. Please login again.");
+  const refreshKey = account.id || account.refreshToken;
+  let task = accountRefreshTasks.get(refreshKey);
+  if (!task) {
+    task = (async () => {
+      const response = await fetch("https://auth.openai.com/oauth/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          grant_type: "refresh_token",
+          client_id: OAUTH_CLIENT_ID,
+          refresh_token: account.refreshToken,
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error("Session has expired. Please login again.");
+      return applyTokenResponse(account, data);
+    })();
+    accountRefreshTasks.set(refreshKey, task);
   }
-  account.accessToken = data.access_token;
-  account.refreshToken = data.refresh_token;
-  account.idToken = typeof data.id_token === "string" ? data.id_token : account.idToken;
-  account.expiresAt = Date.now() + Math.max(60, Number(data.expires_in) || 3600) * 1000;
-  const identity = extractIdentity(account.accessToken, account.idToken);
-  account.email ??= identity.email;
-  account.accountId ??= identity.accountId;
-  return account.accessToken;
+  try {
+    const updated = await task;
+    Object.assign(account, updated);
+    return account.accessToken;
+  } finally {
+    if (accountRefreshTasks.get(refreshKey) === task) accountRefreshTasks.delete(refreshKey);
+  }
 }
 
 async function usableAccessToken(account) {
@@ -172,20 +177,19 @@ async function usableAccessToken(account) {
 }
 
 async function fetchUsage(account) {
-  const accessToken = await usableAccessToken(account);
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15_000);
+  const timeout = setTimeout(() => controller.abort(), 20_000);
   try {
-    const response = await fetch("https://chatgpt.com/backend-api/wham/usage", {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        Accept: "application/json",
-        ...(account.usageAccountId || account.accountId
-          ? { "ChatGPT-Account-ID": account.usageAccountId || account.accountId }
-          : {}),
-      },
+    let accessToken = await usableAccessToken(account);
+    const request = () => fetch("https://chatgpt.com/backend-api/wham/usage", {
+      headers: buildUsageHeaders(account, accessToken),
       signal: controller.signal,
     });
+    let response = await request();
+    if (response.status === 401) {
+      accessToken = await refreshAccount(account);
+      response = await request();
+    }
     if (!response.ok) throw new Error(`Usage request returned ${response.status}.`);
     const quota = extractUsageQuota(await response.json(), Date.now());
     if (account.email && quota.sourceEmail && account.email !== quota.sourceEmail) {
@@ -238,20 +242,30 @@ async function runUsageQuotaRefresh(targetAccountIds = null) {
   const targets = storage.accounts
     .map((account, index) => ({ account, index }))
     .filter(({ account }) => !targetAccountIds || targetAccountIds.has(account.id));
-  for (const { index, account } of targets) {
-    try {
-      const previous = quotaForAccount(account, cache);
-      const quota = await fetchStableUsage(account, previous);
-      cache.byLocalId[account.id] = quota;
-    } catch (error) {
-      errors.push(`Account ${index + 1}: ${error instanceof Error ? error.message : String(error)}`);
-      // Never render an old value as though it were a fresh quota snapshot.
-      // A failed check is clearer as “not checked” than a misleading cache row.
-      if (!error?.keepCache) {
-        delete cache.byLocalId[account.id];
+  let nextTarget = 0;
+  const refreshWorker = async () => {
+    while (nextTarget < targets.length) {
+      const { index, account } = targets[nextTarget++];
+      try {
+        const previous = quotaForAccount(account, cache);
+        const quota = await fetchStableUsage(account, previous);
+        cache.byLocalId[account.id] = quota;
+      } catch (error) {
+        errors.push(`Account ${index + 1}: ${error instanceof Error ? error.message : String(error)}`);
+        // Never render an old value as though it were a fresh quota snapshot.
+        // A failed check is clearer as “not checked” than a misleading cache row.
+        if (!error?.keepCache) {
+          delete cache.byLocalId[account.id];
+        }
       }
     }
-  }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.min(QUOTA_REFRESH_CONCURRENCY, targets.length) },
+      () => refreshWorker(),
+    ),
+  );
   await writeSecretJson(ACCOUNTS_PATH, storage);
   await writeSecretJson(QUOTA_PATH, cache);
   return errors;
@@ -275,6 +289,7 @@ async function getDashboard() {
       index,
       email: account.email,
       label: account.email || `Account ${index + 1}`,
+      planType: quota?.planType || account.planType,
       current: index === storage.activeIndex,
       enabled: true,
       hasSavedLogin: Boolean(account.savedLogin?.password),
@@ -294,62 +309,8 @@ async function getDashboard() {
 }
 
 async function syncAccountToCodex(account) {
-  const accessToken = await usableAccessToken(account);
-  // The Codex file credential format requires an id_token field. OAuth refresh
-  // responses do not always include one; the official CLI-compatible fallback
-  // is the access token, which still carries the necessary identity claims.
-  const idToken = account.idToken || accessToken;
-  account.idToken = idToken;
-  const current = await readJson(AUTH_PATH, {});
-  await writeSecretJson(AUTH_PATH, {
-    ...current,
-    auth_mode: "chatgpt",
-    OPENAI_API_KEY: null,
-    tokens: {
-      id_token: idToken,
-      access_token: accessToken,
-      refresh_token: account.refreshToken,
-      account_id: account.accountId,
-    },
-    last_refresh: new Date().toISOString(),
-    email: account.email,
-    desktopAuthSyncVersion: Date.now(),
-  });
-}
-
-function startOAuthCallbackServer(state) {
-  let code = null;
-  let closed = false;
-  const server = http.createServer((request, response) => {
-    const url = new URL(request.url || "/", "http://localhost:1455");
-    if (url.pathname !== "/auth/callback" || url.searchParams.get("state") !== state || !url.searchParams.get("code")) {
-      response.writeHead(400, { "Content-Type": "text/plain" });
-      response.end("Invalid OAuth callback.");
-      return;
-    }
-    code = url.searchParams.get("code");
-    response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-    response.end("<h2>Login complete</h2><p>You may close this browser tab.</p>");
-  });
-  return new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(1455, "127.0.0.1", () => resolve({
-      close: () => {
-        if (closed) return;
-        closed = true;
-        server.close();
-      },
-      wait: () => new Promise((finish) => {
-        const started = Date.now();
-        const interval = setInterval(() => {
-          if (code || closed || Date.now() - started > 5 * 60_000) {
-            clearInterval(interval);
-            finish(code);
-          }
-        }, 150);
-      }),
-    }));
-  });
+  await usableAccessToken(account);
+  await writeSecretJson(AUTH_PATH, buildCodexAuthFile(account));
 }
 
 function normalizeLoginAutomation(credentials) {
@@ -372,6 +333,52 @@ function decryptLoginSecret(value) {
   return safeStorage.decryptString(Buffer.from(value, "base64"));
 }
 
+async function loadSmsSettings() {
+  const stored = await readJson(SETTINGS_PATH, null);
+  const storedSms = stored?.sms ?? {};
+  const sms = {
+    ...migrateSmsSettings(storedSms, stored?.version),
+    baseUrl: DEFAULT_SMS_SETTINGS.baseUrl,
+    service: DEFAULT_SMS_SETTINGS.service,
+    maxAttempts: DEFAULT_SMS_SETTINGS.maxAttempts,
+    codeTimeoutMs: DEFAULT_SMS_SETTINGS.codeTimeoutMs,
+  };
+  let settings;
+  try {
+    settings = normalizeSmsSettings(sms);
+  } catch {
+    settings = normalizeSmsSettings({});
+  }
+  return { settings, encryptedApiKey: typeof storedSms.apiKey === "string" ? storedSms.apiKey : null };
+}
+
+async function saveSmsSettings(input) {
+  const { encryptedApiKey: previousKey } = await loadSmsSettings();
+  const settings = normalizeSmsSettings({
+    ...input,
+    baseUrl: DEFAULT_SMS_SETTINGS.baseUrl,
+    service: DEFAULT_SMS_SETTINGS.service,
+    maxAttempts: DEFAULT_SMS_SETTINGS.maxAttempts,
+    codeTimeoutMs: DEFAULT_SMS_SETTINGS.codeTimeoutMs,
+  });
+  const rawApiKey = typeof input?.apiKey === "string" ? input.apiKey.trim() : "";
+  // An empty field keeps the stored key so the UI never has to echo it back.
+  const encryptedApiKey = rawApiKey ? encryptLoginSecret(rawApiKey) : previousKey;
+  if (settings.enabled && !encryptedApiKey) throw new Error("A HeroSMS API key is required to rent numbers.");
+  await writeSecretJson(SETTINGS_PATH, {
+    version: SMS_SETTINGS_VERSION,
+    sms: { ...settings, apiKey: encryptedApiKey },
+  });
+  return { ...settings, hasApiKey: Boolean(encryptedApiKey) };
+}
+
+async function createSmsSessionForLogin() {
+  const { settings, encryptedApiKey } = await loadSmsSettings();
+  if (!settings.enabled || !encryptedApiKey) return null;
+  const client = createSmsClient({ settings, apiKey: decryptLoginSecret(encryptedApiKey) });
+  return createPhoneVerificationSession({ client, log: (message) => sendLog(message) });
+}
+
 function savedLoginFor(account) {
   const login = account?.savedLogin;
   if (!login?.email || !login.password) return null;
@@ -382,38 +389,7 @@ function savedLoginFor(account) {
   };
 }
 
-function buildAutofillScript(selector, value) {
-  return `(() => {
-    const field = document.querySelector(${JSON.stringify(selector)});
-    if (!field || field.disabled) return false;
-    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
-    if (!setter) return false;
-    setter.call(field, ${JSON.stringify(value)});
-    field.dispatchEvent(new Event("input", { bubbles: true }));
-    field.dispatchEvent(new Event("change", { bubbles: true }));
-    const form = field.closest("form");
-    const submit = [...(form?.querySelectorAll("button") ?? [])].find((button) =>
-      !button.disabled && button.textContent.trim() === "Continue",
-    );
-    if (!submit) return false;
-    submit.click();
-    return true;
-  })()`;
-}
-
-function buildConsentScript() {
-  return `(() => {
-    if (!document.body.innerText.includes("Sign in to Codex with ChatGPT")) return false;
-    const submit = [...document.querySelectorAll("form button")].find((button) =>
-      !button.disabled && button.textContent.trim() === "Continue",
-    );
-    if (!submit) return false;
-    submit.click();
-    return true;
-  })()`;
-}
-
-function createOAuthLoginWindow(url, automation, callback) {
+function createOAuthLoginWindow(url, automation, callback, smsSession = null) {
   const loginWindow = new BrowserWindow({
     width: 520,
     height: 760,
@@ -428,17 +404,72 @@ function createOAuthLoginWindow(url, automation, callback) {
       sandbox: true,
     },
   });
-  const steps = [
-    { type: "field", selector: 'input[type="email"], input[autocomplete="username"]', value: automation.email },
-    { type: "field", selector: 'input[type="password"][autocomplete="current-password"], input[type="password"]', value: automation.password },
-    ...(automation.totpSecret ? [{ type: "field", selector: 'input[autocomplete="one-time-code"], input[inputmode="numeric"]', value: () => generateTotpCode(automation.totpSecret) }] : []),
-    { type: "consent" },
-  ];
-  let nextStep = 0;
   let filling = false;
+  const completedActionKeys = new Set();
+  let phoneSession = smsSession;
+  let rotatePhone = false;
+
+  const readPageState = () => loginWindow.webContents.executeJavaScript(buildPageStateScript(), true);
+
+  const stopPhoneAutomation = (message) => {
+    sendLog(`Phone verification stopped: ${message}`, "error");
+    phoneSession?.dispose("phone automation stopped");
+    phoneSession = null;
+    rotatePhone = false;
+  };
+
+  /** Rents a number, rotating whenever OpenAI refuses the current one. */
+  const resolvePhoneNumber = async (state) => {
+    if (!phoneSession || !state.hasPhoneField) return "";
+    const current = phoneSession.current;
+    if (current?.submitted && hasPhoneNumberError(state)) {
+      phoneSession.reject(state.errorText);
+    }
+    const activation = await phoneSession.acquire();
+    return activation.phoneNumber;
+  };
+
+  /**
+   * True while a code field belongs to the rented number rather than to the
+   * account's authenticator app. Any code prompt that shows up after a number
+   * was rented is the phone verification unless the page says otherwise.
+   */
+  const isSmsCodeStage = (state) => {
+    if (!phoneSession || !state.hasCodeField) return false;
+    const text = `${state.url ?? ""} ${state.heading ?? ""} ${state.bodyText ?? ""}`.toLowerCase();
+    // Keep treating this as phone verification after a number times out. At
+    // that point `current` is cleared, but typing the account TOTP here would
+    // submit a guaranteed-wrong phone code.
+    if (/phone-verification|check your phone|sent to .* on whatsapp|text message|sms/.test(text)) return true;
+    if (!phoneSession.current) return false;
+    return !isAuthenticatorPrompt(state);
+  };
+
+  /** Waits for the rented number's SMS, rotating the number when none arrives. */
+  const resolveSmsCode = async (state) => {
+    if (!isSmsCodeStage(state)) return "";
+    if (!phoneSession.current) return "";
+    // A provider only ever returns the same code, so a refused code means the
+    // number itself has to go.
+    if (phoneSession.current.codeSubmitted && isNumberRejection(state.errorText)) {
+      phoneSession.reject(state.errorText);
+      rotatePhone = true;
+      return "";
+    }
+    if (phoneSession.current.codeSubmitted) return "";
+    phoneSession.markSubmitted();
+    sendLog(`Waiting for the SMS code on ${phoneSession.current.phoneNumber}…`);
+    const code = await phoneSession.waitForCode();
+    if (!code) {
+      rotatePhone = true;
+      return "";
+    }
+    return code;
+  };
 
   const tryAutofill = async () => {
-    if (filling || loginWindow.isDestroyed() || nextStep >= steps.length) return;
+    if (filling || loginWindow.isDestroyed()) return;
+    if (loginWindow.webContents.isLoadingMainFrame()) return;
     let pageUrl;
     try {
       pageUrl = new URL(loginWindow.webContents.getURL());
@@ -449,12 +480,55 @@ function createOAuthLoginWindow(url, automation, callback) {
 
     filling = true;
     try {
-      const step = steps[nextStep];
-      const script = step.type === "consent"
-        ? buildConsentScript()
-        : buildAutofillScript(step.selector, typeof step.value === "function" ? step.value() : step.value);
-      const submitted = await loginWindow.webContents.executeJavaScript(script, true);
-      if (submitted) nextStep += 1;
+      const state = await readPageState();
+      const values = { totpCode: "", smsCode: "", phoneNumber: "", rotatePhone: false };
+
+      if (rotatePhone) {
+        values.rotatePhone = true;
+      } else {
+        try {
+          values.phoneNumber = await resolvePhoneNumber(state);
+          values.smsCode = await resolveSmsCode(state);
+        } catch (error) {
+          stopPhoneAutomation(error instanceof Error ? error.message : String(error));
+          return;
+        }
+      }
+
+      // The authenticator code must never be typed into an SMS prompt; that
+      // wrong guess is what used to loop the phone verification step.
+      if (!values.smsCode && !isSmsCodeStage(state) && automation.totpSecret) {
+        try {
+          values.totpCode = generateTotpCode(automation.totpSecret);
+        } catch (error) {
+          // A malformed secret must not silently stall the whole login.
+          sendLog(`Saved 2FA secret is unusable: ${error instanceof Error ? error.message : String(error)}`, "error");
+          automation.totpSecret = "";
+        }
+      }
+
+      if (loginWindow.isDestroyed()) return;
+      const result = await loginWindow.webContents.executeJavaScript(
+        buildOAuthAutomationScript(automation, values, [...completedActionKeys]),
+        true,
+      );
+      if (result?.needsPhoneReset) {
+        stopPhoneAutomation("the page offers no way back to phone entry. Finish this login by hand.");
+        return;
+      }
+      if (result?.acted && result.key) {
+        completedActionKeys.add(result.key);
+        if (result.action === "phone") {
+          phoneSession?.markSubmitted();
+          sendLog(`Submitted ${values.phoneNumber} to OpenAI.`);
+        }
+        if (result.action === "rotate-phone") rotatePhone = false;
+        if (result.action === "sms-code") phoneSession?.markCodeSubmitted();
+        const details = result.url
+          ? ` (${result.url}; smsSelected=${String(result.smsSelected ?? "n/a")})`
+          : "";
+        console.info(`[OAuth automation] ${result.action}${details}`);
+      }
     } catch {
       // The auth page may still be changing between redirects; navigation will retry.
     } finally {
@@ -462,11 +536,26 @@ function createOAuthLoginWindow(url, automation, callback) {
     }
   };
 
-  const retryTimer = setInterval(() => { void tryAutofill(); }, 250);
+  const retryTimer = setInterval(() => { void tryAutofill(); }, 100);
+  const resetAction = () => {
+    completedActionKeys.clear();
+  };
+  const resetAndAutofill = () => {
+    resetAction();
+    void tryAutofill();
+  };
+  loginWindow.webContents.on("did-start-navigation", (_event, _url, _isInPlace, isMainFrame) => {
+    if (isMainFrame) resetAction();
+  });
+  loginWindow.webContents.on("dom-ready", tryAutofill);
   loginWindow.webContents.on("did-finish-load", tryAutofill);
-  loginWindow.webContents.on("did-navigate", tryAutofill);
+  loginWindow.webContents.on("did-navigate", resetAndAutofill);
+  loginWindow.webContents.on("did-navigate-in-page", (_event, _url, isMainFrame) => {
+    if (isMainFrame) resetAndAutofill();
+  });
   loginWindow.on("closed", () => {
     clearInterval(retryTimer);
+    phoneSession?.dispose("login window closed");
     callback.close();
   });
   loginWindow.loadURL(url);
@@ -483,11 +572,16 @@ async function startBrowserLogin(credentials) {
     throw new Error("Port 1455 is unavailable. Close another login flow and try again.");
   });
   let loginWindow;
-  const cancel = () => {
-    callback.close();
+  const smsSession = await createSmsSessionForLogin().catch((error) => {
+    sendLog(`Phone verification is off: ${error instanceof Error ? error.message : String(error)}`, "error");
+    return null;
+  });
+  const cancel = async () => {
     if (loginWindow && !loginWindow.isDestroyed()) loginWindow.close();
+    smsSession?.dispose("login finished");
+    await callback.close();
   };
-  pendingLogin = { close: cancel };
+  pendingLogin = { close: () => { void cancel(); } };
   try {
     const url = new URL("https://auth.openai.com/oauth/authorize");
     url.search = new URLSearchParams({
@@ -495,31 +589,38 @@ async function startBrowserLogin(credentials) {
       scope: OAUTH_SCOPE, code_challenge: challenge, code_challenge_method: "S256", state,
       id_token_add_organizations: "true", codex_cli_simplified_flow: "true", originator: "codex_cli_rs", prompt: "login",
     }).toString();
-    loginWindow = createOAuthLoginWindow(url.toString(), automation, callback);
+    loginWindow = createOAuthLoginWindow(url.toString(), automation, callback, smsSession);
     const code = await callback.wait();
     if (!code) throw new Error("Login was cancelled or timed out.");
+    // OpenAI accepted the phone step, so close the activation instead of refunding it.
+    await smsSession?.finish();
     const response = await fetch("https://auth.openai.com/oauth/token", {
       method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ grant_type: "authorization_code", client_id: OAUTH_CLIENT_ID, code, code_verifier: verifier, redirect_uri: OAUTH_REDIRECT }),
     });
     const tokens = await response.json().catch(() => ({}));
-    if (!response.ok || typeof tokens.access_token !== "string" || typeof tokens.refresh_token !== "string") throw new Error("OpenAI did not return a valid session.");
+    if (!response.ok) {
+      const errorCode = typeof tokens.error === "string" ? `: ${tokens.error}` : "";
+      throw new Error(`OpenAI OAuth exchange failed (${response.status}${errorCode}).`);
+    }
+    if (typeof tokens.access_token !== "string") throw new Error("OpenAI did not return a valid access token.");
     const identity = extractIdentity(tokens.access_token, tokens.id_token);
+    const loginEmail = identity.email?.toLowerCase() ?? null;
     const storage = await loadStorage();
     const wasEmpty = storage.accounts.length === 0;
     const existingIndex = storage.accounts.findIndex((account) =>
-      (identity.accountId && account.accountId === identity.accountId) || (identity.email && account.email === identity.email),
+      (identity.accountId && account.accountId === identity.accountId) || (loginEmail && account.email === loginEmail),
     );
     const wasActive = existingIndex === storage.activeIndex;
+    const existingAccount = existingIndex >= 0 ? storage.accounts[existingIndex] : null;
+    if (typeof tokens.refresh_token !== "string" && !existingAccount?.refreshToken) {
+      throw new Error("OpenAI did not return a reusable refresh token. Please try signing in again.");
+    }
+    const tokenState = applyTokenResponse(existingAccount ?? {}, tokens);
     const account = {
-      id: existingIndex >= 0 ? storage.accounts[existingIndex].id : randomBytes(12).toString("hex"),
-      email: identity.email,
-      accountId: identity.accountId,
-      accessToken: tokens.access_token,
-      refreshToken: tokens.refresh_token,
-      idToken: typeof tokens.id_token === "string" ? tokens.id_token : null,
-      expiresAt: Date.now() + Math.max(60, Number(tokens.expires_in) || 3600) * 1000,
-      addedAt: existingIndex >= 0 ? storage.accounts[existingIndex].addedAt : Date.now(),
+      ...tokenState,
+      id: existingAccount?.id ?? randomBytes(12).toString("hex"),
+      addedAt: existingAccount?.addedAt ?? Date.now(),
       savedLogin: {
         email: automation.email,
         password: encryptLoginSecret(automation.password),
@@ -535,7 +636,7 @@ async function startBrowserLogin(credentials) {
     await refreshUsageQuota(new Set([account.id])).catch(() => undefined);
     return { dashboard: await getDashboard() };
   } finally {
-    cancel();
+    await cancel();
     automation = null;
     pendingLogin = null;
   }
@@ -574,10 +675,35 @@ function secureImportedLogins(accounts) {
   });
 }
 
-ipcMain.handle("accounts:load", async () => {
-  const probeErrors = await refreshUsageQuota();
-  return { ...(await getDashboard()), probeErrors };
+ipcMain.handle("settings:load-sms", async () => {
+  const { settings, encryptedApiKey } = await loadSmsSettings();
+  // The API key never leaves the main process; the UI only learns that one exists.
+  return { ...settings, hasApiKey: Boolean(encryptedApiKey), defaults: DEFAULT_SMS_SETTINGS };
 });
+ipcMain.handle("settings:save-sms", (_event, input) => saveSmsSettings(input));
+ipcMain.handle("settings:test-sms", async (_event, input) => {
+  const { settings, encryptedApiKey } = await loadSmsSettings();
+  const rawApiKey = typeof input?.apiKey === "string" ? input.apiKey.trim() : "";
+  const apiKey = rawApiKey || (encryptedApiKey ? decryptLoginSecret(encryptedApiKey) : "");
+  const testSettings = normalizeSmsSettings({
+    ...settings,
+  });
+  const client = createSmsClient({ settings: testSettings, apiKey });
+  return { balance: await client.getBalance() };
+});
+ipcMain.handle("settings:list-sms-countries", async (_event, input) => {
+  const { settings, encryptedApiKey } = await loadSmsSettings();
+  const rawApiKey = typeof input?.apiKey === "string" ? input.apiKey.trim() : "";
+  const apiKey = rawApiKey || (encryptedApiKey ? decryptLoginSecret(encryptedApiKey) : "");
+  if (!apiKey) throw new Error("Enter a HeroSMS API key before loading prices.");
+  const service = DEFAULT_SMS_SETTINGS.service;
+  const client = createSmsClient({
+    settings,
+    apiKey,
+  });
+  return { service, offers: await client.getCountryOffers(service) };
+});
+ipcMain.handle("accounts:load", () => getDashboard());
 ipcMain.handle("accounts:login", (_event, credentials) => startBrowserLogin(credentials));
 ipcMain.handle("accounts:cancel-login", () => {
   const activeLogin = pendingLogin;
@@ -586,6 +712,13 @@ ipcMain.handle("accounts:cancel-login", () => {
 });
 ipcMain.handle("accounts:refresh-quota", async () => {
   const probeErrors = await refreshUsageQuota();
+  return { dashboard: await getDashboard(), probeErrors };
+});
+ipcMain.handle("accounts:refresh-current-quota", async () => {
+  const storage = await loadStorage();
+  const account = storage.accounts[storage.activeIndex];
+  if (!account) return { dashboard: await getDashboard(), probeErrors: [] };
+  const probeErrors = await refreshUsageQuota(new Set([account.id]));
   return { dashboard: await getDashboard(), probeErrors };
 });
 ipcMain.handle("accounts:switch", async (_event, index) => {
@@ -633,21 +766,28 @@ ipcMain.handle("accounts:delete", async (_event, index) => {
   await writeSecretJson(ACCOUNTS_PATH, storage);
   return getDashboard();
 });
-ipcMain.handle("accounts:export", async (_event, password) => {
+ipcMain.handle("accounts:export", async () => {
   const storage = await loadStorage();
   if (!storage.accounts.length) throw new Error("There are no accounts to export.");
-  const exportData = encryptPortableExport({ version: 1, accounts: portableAccounts(storage), activeIndex: storage.activeIndex }, password);
+  const exportData = {
+    version: 3,
+    encrypted: false,
+    accounts: portableAccounts(storage),
+    activeIndex: storage.activeIndex,
+  };
   const { filePath, canceled } = await dialog.showSaveDialog(mainWindow, { title: "Export Codex sessions", defaultPath: `codex-sessions-${new Date().toISOString().slice(0, 10)}.json`, filters: [{ name: "JSON", extensions: ["json"] }] });
   if (canceled || !filePath) return { cancelled: true };
   await writeSecretJson(filePath, exportData);
   return { cancelled: false, count: storage.accounts.length };
 });
-ipcMain.handle("accounts:import", async (_event, password) => {
+ipcMain.handle("accounts:import", async () => {
   const { filePaths, canceled } = await dialog.showOpenDialog(mainWindow, { title: "Import Codex sessions", properties: ["openFile"], filters: [{ name: "JSON", extensions: ["json"] }] });
   if (canceled || !filePaths[0]) return { cancelled: true };
   const exportData = JSON.parse(await fs.readFile(filePaths[0], "utf8"));
-  const decrypted = exportData.version === 2 && exportData.encrypted ? decryptPortableExport(exportData, password) : exportData;
-  const incoming = secureImportedLogins(assertImportShape(decrypted, { allowSavedLogin: exportData.version === 2 && exportData.encrypted }));
+  if (exportData?.encrypted) {
+    throw new Error("Password-protected export files are no longer supported. Export the sessions again as plain JSON.");
+  }
+  const incoming = secureImportedLogins(assertImportShape(exportData, { allowSavedLogin: exportData?.version === 3 }));
   const storage = await loadStorage();
   const existing = new Set(storage.accounts.map((account) => account.accountId || account.email || account.refreshToken));
   const additions = incoming.filter((account) => !existing.has(account.accountId || account.email || account.refreshToken));

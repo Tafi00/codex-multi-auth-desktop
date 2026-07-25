@@ -1,4 +1,5 @@
 import { parseLoginCredentials } from "./login-credentials.js";
+import { createAutoRefreshScheduler } from "./auto-refresh-scheduler.js";
 
 const $ = (selector) => document.querySelector(selector);
 const body = $("#accountsBody");
@@ -8,13 +9,15 @@ const toast = $("#toast");
 const dialog = $("#confirmDialog");
 const loginDialog = $("#loginDialog");
 const loginForm = $("#loginForm");
-const transferDialog = $("#transferDialog");
-const transferForm = $("#transferForm");
 let dashboard = { accounts: [] };
 let busy = false;
 let loginInProgress = false;
 const loginButton = $("#loginButton");
-const AUTO_REFRESH_MS = 5 * 60 * 1000;
+const STARTUP_AUTO_REFRESH_SETUP_DELAY_MS = 2_500;
+const AUTO_REFRESH_TICK_MS = 5_000;
+const CURRENT_ACCOUNT_REFRESH_MS = 60_000;
+const FULL_ACCOUNT_REFRESH_MS = 10 * 60_000;
+let autoRefreshScheduler = null;
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char]);
@@ -57,6 +60,9 @@ function render(data) {
   body.innerHTML = accounts.map((account, accountPosition) => {
     const [tone, status] = statusFor(account);
     const displayName = account.email || account.label;
+    const plan = account.planType ? `<span class="account-plan">${escapeHtml(account.planType)}</span>` : "";
+    const current = account.current ? '<span class="current-pill">CURRENT</span>' : "";
+    const accountMeta = plan || current ? `<span class="account-meta">${plan}${current}</span>` : "";
     const copyMenuPosition = accountPosition >= accounts.length - 2 ? "above" : "";
     const savedLoginActions = account.hasSavedLogin
       ? `<button class="icon-button action-icon" data-relogin="${account.index}" aria-label="Sign in again with saved credentials" title="Sign in again">↻</button><details class="copy-menu ${copyMenuPosition}"><summary class="icon-button action-icon" aria-label="Copy login details" title="Copy login details">⧉</summary><div class="copy-popover"><button data-copy="email" data-index="${account.index}">Copy email</button><button data-copy="password" data-index="${account.index}">Copy password</button><button data-copy="totp" data-index="${account.index}">Copy 2FA code</button></div></details>`
@@ -64,7 +70,7 @@ function render(data) {
     const switchLabel = account.current ? "Đang chọn" : "Switch";
     const deleteButton = account.current ? "" : `<button class="icon-button" data-delete="${account.index}" aria-label="Remove ${escapeHtml(displayName)}" title="Remove account">×</button>`;
     return `<tr>
-      <td><div class="account" title="${escapeHtml(displayName)}"><span class="account-name">${escapeHtml(displayName)}${account.current ? '<span class="current-pill">CURRENT</span>' : ""}</span></div></td>
+      <td><div class="account" title="${escapeHtml(displayName)}"><span class="account-name">${escapeHtml(displayName)}</span>${accountMeta}</div></td>
       <td><span class="status ${tone}"><i class="dot"></i>${escapeHtml(status)}</span></td>
       <td>${quotaHtml(account.quota, "primary")}</td>
       <td>${quotaHtml(account.quota, "secondary")}</td>
@@ -106,30 +112,6 @@ function promptLoginCredentials() {
       const rawCredentials = loginDialog.returnValue === "confirm" ? $("#loginCredentials").value : null;
       loginForm.reset();
       resolve(rawCredentials);
-    }, { once: true });
-  });
-}
-
-function promptTransferPassword(mode) {
-  const exporting = mode === "export";
-  const password = $("#transferPassword");
-  const passwordConfirm = $("#transferPasswordConfirm");
-  $("#transferTitle").textContent = exporting ? "Export protected file" : "Import protected file";
-  $("#transferMessage").textContent = exporting
-    ? "Choose a password to encrypt the exported sessions and saved login details. This password cannot be recovered."
-    : "Enter the password used to encrypt this export file.";
-  $("#transferPasswordLabel").textContent = exporting ? "Export password" : "Export password";
-  $("#transferSubmit").textContent = exporting ? "Export encrypted file" : "Import encrypted file";
-  $("#transferConfirmField").hidden = !exporting;
-  password.autocomplete = exporting ? "new-password" : "current-password";
-  passwordConfirm.required = exporting;
-  transferForm.reset();
-  transferDialog.showModal();
-  return new Promise((resolve) => {
-    transferDialog.addEventListener("close", () => {
-      const result = transferDialog.returnValue === "confirm" ? { password: password.value, passwordConfirm: passwordConfirm.value } : null;
-      transferForm.reset();
-      resolve(result);
     }, { once: true });
   });
 }
@@ -200,24 +182,148 @@ async function refreshQuotaInBackground() {
   }
 }
 
-$("#exportButton").addEventListener("click", async () => {
-  const approved = await confirmAction("Export sessions?", "File export có thể đăng nhập các account này trên thiết bị khác. Chỉ lưu và chuyển qua kênh bạn tin cậy.");
-  if (!approved) return;
-  const credentials = await promptTransferPassword("export");
-  if (!credentials) return;
-  if (credentials.password !== credentials.passwordConfirm) {
-    showToast("Export passwords do not match.", "error");
+async function refreshCurrentQuotaInBackground() {
+  if (busy) return;
+  try {
+    const result = await window.codexAuth.refreshCurrentQuota();
+    if (result?.dashboard) render(result.dashboard);
+  } catch {
+    // Keep cached quota visible; the scheduler will retry on the next interval.
+  }
+}
+
+function startAutoRefreshScheduler() {
+  autoRefreshScheduler?.stop();
+  autoRefreshScheduler = createAutoRefreshScheduler([
+    {
+      key: "full:codex",
+      label: "Codex full quota refresh",
+      intervalMs: FULL_ACCOUNT_REFRESH_MS,
+      run: refreshQuotaInBackground,
+    },
+    {
+      key: "current:codex",
+      label: "Codex current account quota refresh",
+      intervalMs: CURRENT_ACCOUNT_REFRESH_MS,
+      run: refreshCurrentQuotaInBackground,
+    },
+  ], {
+    tickMs: AUTO_REFRESH_TICK_MS,
+    maxConcurrent: 1,
+  });
+  autoRefreshScheduler.start();
+}
+
+const smsDialog = $("#smsDialog");
+const smsForm = $("#smsForm");
+
+function applySmsSettings(settings) {
+  $("#smsEnabled").checked = Boolean(settings.enabled);
+  const countrySelect = $("#smsCountry");
+  countrySelect.replaceChildren(new Option(`Country ID ${settings.country}`, settings.country, true, true));
+  $("#smsApiKey").value = "";
+  $("#smsApiKey").placeholder = settings.hasApiKey
+    ? "Đã lưu key — để trống nếu không đổi"
+    : "Dán API key HeroSMS";
+  $("#smsBalanceValue").textContent = "—";
+}
+
+function formatSmsPrice(value) {
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 4 }).format(value);
+}
+
+async function loadSmsCountryOffers(selectedCountry = $("#smsCountry").value) {
+  const countrySelect = $("#smsCountry");
+  countrySelect.disabled = true;
+  try {
+    const { offers } = await window.codexAuth.listSmsCountries({
+      apiKey: $("#smsApiKey").value,
+    });
+    const selectedOffer = offers.find((offer) => offer.id === selectedCountry);
+    const options = offers.map((offer) => new Option(
+      `${offer.name} — giá ${formatSmsPrice(offer.price)} · còn ${offer.count} số`,
+      offer.id,
+      false,
+      offer.id === selectedCountry,
+    ));
+    if (!selectedOffer && selectedCountry) {
+      options.unshift(new Option(`Country ID ${selectedCountry} — hiện không có số`, selectedCountry, true, true));
+    }
+    countrySelect.replaceChildren(...options);
+    if (!countrySelect.value && options[0]) countrySelect.value = options[0].value;
+  } catch (error) {
+    showToast(error?.message || String(error), "error");
+  } finally {
+    countrySelect.disabled = false;
+  }
+}
+
+function readSmsForm() {
+  return {
+    enabled: $("#smsEnabled").checked,
+    apiKey: $("#smsApiKey").value,
+    country: $("#smsCountry").value,
+  };
+}
+
+$("#smsSettingsButton").addEventListener("click", async () => {
+  let settings;
+  try {
+    settings = await window.codexAuth.loadSmsSettings();
+    applySmsSettings(settings);
+  } catch (error) {
+    showToast(error?.message || String(error), "error");
     return;
   }
-  await run(() => window.codexAuth.exportSessions(credentials.password), "Đã export sessions.");
+  smsDialog.showModal();
+  void checkSmsApiKey();
+});
+
+async function checkSmsApiKey() {
+  const button = $("#smsTestButton");
+  const balance = $("#smsBalanceValue");
+  button.disabled = true;
+  balance.textContent = "…";
+  try {
+    const result = await window.codexAuth.testSmsSettings(readSmsForm());
+    balance.textContent = formatSmsPrice(result.balance);
+    void loadSmsCountryOffers($("#smsCountry").value);
+  } catch (error) {
+    balance.textContent = "Invalid";
+    showToast(error?.message || String(error), "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+$("#smsTestButton").addEventListener("click", checkSmsApiKey);
+
+smsDialog.addEventListener("close", async () => {
+  if (smsDialog.returnValue !== "confirm") return;
+  const input = readSmsForm();
+  smsForm.reset();
+  try {
+    await window.codexAuth.saveSmsSettings(input);
+    showToast("Đã lưu cấu hình phone verification.", "success");
+  } catch (error) {
+    showToast(error?.message || String(error), "error");
+  }
+});
+
+window.codexAuth.onLog((entry) => {
+  if (entry?.message) showToast(entry.message, entry.tone || "");
+});
+
+$("#exportButton").addEventListener("click", async () => {
+  const approved = await confirmAction("Export sessions?", "File JSON không mã hóa sẽ chứa refresh token và thông tin đăng nhập đã lưu. Chỉ lưu và chuyển qua kênh bạn tin cậy.");
+  if (!approved) return;
+  await run(() => window.codexAuth.exportSessions(), "Đã export sessions.");
 });
 
 $("#importButton").addEventListener("click", async () => {
-  const approved = await confirmAction("Import sessions?", "Chỉ import file do bạn export. Account trùng sẽ được bỏ qua; account hiện tại được giữ nguyên.");
+  const approved = await confirmAction("Import sessions?", "Chỉ import file JSON do bạn tin cậy. Account trùng sẽ được bỏ qua; account hiện tại được giữ nguyên.");
   if (!approved) return;
-  const credentials = await promptTransferPassword("import");
-  if (!credentials) return;
-  await run(() => window.codexAuth.importSessions(credentials.password), "Đã import sessions.");
+  await run(() => window.codexAuth.importSessions(), "Đã import sessions.");
 });
 
 body.addEventListener("click", async (event) => {
@@ -241,13 +347,17 @@ body.addEventListener("click", async (event) => {
     if (approved) await run(() => window.codexAuth.deleteAccount(index), "Đã xóa account.");
     return;
   }
-  const approved = await confirmAction("Switch account?", `Codex sẽ đóng và mở lại với ${account?.email || account?.label || `account ${index + 1}`}.`);
+  const approved = await confirmAction(
+    "Switch account?",
+    `Codex sẽ đóng và mở lại với ${account?.email || account?.label || `account ${index + 1}`}. Task Codex đang chạy sẽ bị dừng.`,
+  );
   if (approved) await run(() => window.codexAuth.switchAccount(index), "Đã switch account và mở lại Codex.");
 });
 
 async function startDashboard() {
   await run(() => window.codexAuth.load(), "");
-  window.setInterval(refreshQuotaInBackground, AUTO_REFRESH_MS);
+  void refreshQuotaInBackground();
+  window.setTimeout(startAutoRefreshScheduler, STARTUP_AUTO_REFRESH_SETUP_DELAY_MS);
 }
 
 startDashboard();

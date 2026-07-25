@@ -9,16 +9,24 @@ function timestampMs(value) {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-function normalizeUsageWindow(window) {
+function normalizeUsageWindow(window, now) {
   const seconds = finiteNumber(window?.limit_window_seconds ?? window?.window_seconds, NaN);
   const minutes = finiteNumber(
     window?.window_minutes ?? window?.windowMinutes ?? window?.limit_window_minutes,
     Number.isFinite(seconds) ? seconds / 60 : 0,
   );
+  const resetAfterSeconds = finiteNumber(
+    window?.reset_after_seconds ?? window?.resetAfterSeconds,
+    NaN,
+  );
+  const absoluteReset = timestampMs(window?.reset_at ?? window?.resets_at ?? window?.resetAt);
   return {
     usedPercent: Math.max(0, Math.min(100, finiteNumber(window?.used_percent ?? window?.percent_used))),
     windowMinutes: minutes,
-    resetAtMs: timestampMs(window?.reset_at ?? window?.resets_at ?? window?.resetAt),
+    resetAtMs: absoluteReset
+      ?? (Number.isFinite(resetAfterSeconds) && resetAfterSeconds >= 0
+        ? now + resetAfterSeconds * 1000
+        : undefined),
   };
 }
 
@@ -38,12 +46,12 @@ function findRateLimit(data) {
   return candidates.find(hasUsageWindows) ?? null;
 }
 
-function classifyUsageWindows(rateLimit) {
+function classifyUsageWindows(rateLimit, now) {
   const rawPrimary = rateLimit?.primary_window ?? rateLimit?.primary;
   const rawSecondary = rateLimit?.secondary_window ?? rateLimit?.secondary;
   const windows = [
-    rawPrimary ? { source: "primary", value: normalizeUsageWindow(rawPrimary) } : null,
-    rawSecondary ? { source: "secondary", value: normalizeUsageWindow(rawSecondary) } : null,
+    rawPrimary ? { source: "primary", value: normalizeUsageWindow(rawPrimary, now) } : null,
+    rawSecondary ? { source: "secondary", value: normalizeUsageWindow(rawSecondary, now) } : null,
   ].filter(Boolean);
 
   if (windows.length === 0) return { primary: null, secondary: null };
@@ -70,7 +78,7 @@ function classifyUsageWindows(rateLimit) {
 export function extractUsageQuota(data, now) {
   const rateLimit = findRateLimit(data);
   if (!rateLimit) throw new Error("Usage response did not include a supported quota window.");
-  const { primary, secondary } = classifyUsageWindows(rateLimit);
+  const { primary, secondary } = classifyUsageWindows(rateLimit, now);
   if (!primary && !secondary) throw new Error("Usage response did not include a supported quota window.");
   return {
     updatedAt: now,

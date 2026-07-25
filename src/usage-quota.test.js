@@ -35,6 +35,17 @@ test("keeps a short single window in the 5-hour slot", () => {
   assert.equal(quota.secondary, null);
 });
 
+test("derives reset time from reset_after_seconds", () => {
+  const quota = extractUsageQuota({ rate_limit: {
+    primary_window: {
+      used_percent: 12,
+      limit_window_seconds: 18_000,
+      reset_after_seconds: 90,
+    },
+  } }, 10_000);
+  assert.equal(quota.primary.resetAtMs, 100_000);
+});
+
 test("supports rate_limits arrays and optional windows", () => {
   const quota = extractUsageQuota({ rate_limits: [{
     limit_id: "codex",
