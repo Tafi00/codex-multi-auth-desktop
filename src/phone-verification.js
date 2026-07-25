@@ -46,12 +46,19 @@ const AUTHENTICATOR_HINTS = [
   "google authenticator",
 ];
 
+/** Detects a phone-delivered code prompt even when the provider session ended. */
+export function isSmsCodePrompt(state) {
+  const text = `${state?.url ?? ""} ${state?.heading ?? ""} ${state?.bodyText ?? ""}`.toLowerCase();
+  if (!text.trim()) return false;
+  return /phone-verification|check your phone|verification code.{0,80}sent to|sent to \+?\d|resend text message|text message|sms|whatsapp|phone number ending/.test(text);
+}
+
 export function isAuthenticatorPrompt(state) {
   const text = `${state?.heading ?? ""} ${state?.bodyText ?? ""}`.toLowerCase();
   if (!text.trim()) return false;
   // A page that names the phone or a text message is the SMS step even when it
   // also mentions two-step verification in passing.
-  if (/(text message|sms|phone number ending|sent a (text|code) to \+?\d)/.test(text)) return false;
+  if (isSmsCodePrompt(state)) return false;
   return AUTHENTICATOR_HINTS.some((hint) => text.includes(hint));
 }
 

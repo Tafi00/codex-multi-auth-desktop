@@ -11,6 +11,7 @@ import {
   hasPhoneNumberError,
   isAuthenticatorPrompt,
   isNumberRejection,
+  isSmsCodePrompt,
 } from "./phone-verification.js";
 import {
   DEFAULT_SMS_SETTINGS,
@@ -435,13 +436,11 @@ function createOAuthLoginWindow(url, automation, callback, smsSession = null) {
    * was rented is the phone verification unless the page says otherwise.
    */
   const isSmsCodeStage = (state) => {
-    if (!phoneSession || !state.hasCodeField) return false;
-    const text = `${state.url ?? ""} ${state.heading ?? ""} ${state.bodyText ?? ""}`.toLowerCase();
-    // Keep treating this as phone verification after a number times out. At
-    // that point `current` is cleared, but typing the account TOTP here would
-    // submit a guaranteed-wrong phone code.
-    if (/phone-verification|check your phone|sent to .* on whatsapp|text message|sms/.test(text)) return true;
-    if (!phoneSession.current) return false;
+    if (!state.hasCodeField) return false;
+    // Page evidence must win even after the HeroSMS session was stopped or a
+    // number timed out. Otherwise the next tick can type account TOTP here.
+    if (isSmsCodePrompt(state)) return true;
+    if (!phoneSession?.current?.submitted) return false;
     return !isAuthenticatorPrompt(state);
   };
 

@@ -6,6 +6,7 @@ import {
   hasPhoneNumberError,
   isAuthenticatorPrompt,
   isNumberRejection,
+  isSmsCodePrompt,
 } from "./phone-verification.js";
 import { SmsProviderError, normalizeSmsSettings } from "./sms-provider.js";
 
@@ -70,6 +71,16 @@ test("treats the code prompt after a rented number as SMS, not authenticator", (
     true,
   );
   assert.equal(isAuthenticatorPrompt({}), false);
+});
+
+test("recognizes the phone-code screen even without a live provider session", () => {
+  const state = {
+    hasCodeField: true,
+    heading: "Check your phone",
+    bodyText: "Enter the verification code we just sent to +57 300 3336520 Code Incorrect code Resend text message",
+  };
+  assert.equal(isSmsCodePrompt(state), true);
+  assert.equal(isAuthenticatorPrompt(state), false);
 });
 
 test("rents a new number for every rejection and refunds the old one after two minutes", async () => {

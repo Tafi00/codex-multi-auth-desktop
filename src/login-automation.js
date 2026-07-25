@@ -251,6 +251,19 @@ export function buildOAuthAutomationScript(automation, values = {}, completedAct
     for (const step of fieldSteps) {
       const field = findVisible(step.selector);
       if (!field || !step.value) continue;
+      if (step.action === "totp") {
+        // Re-check the live DOM immediately before typing. The page can move
+        // from account 2FA to phone verification after the main-process probe.
+        const prompt = normalize(
+          field.closest("form, main, section")?.innerText
+          || document.body?.innerText,
+        );
+        if (/phone-verification|check your phone|verification code.{0,80}sent to|sent to \\+?\\d|resend text message|text message|sms|whatsapp|phone number ending/.test(
+          location.href.toLowerCase() + " " + prompt,
+        )) {
+          return { acted: false, key: null, blockedTotpOnPhonePrompt: true };
+        }
+      }
       // Codes are keyed by value so a fresh code can retry after a rejection.
       const key = pageBase + "|" + step.action + (step.keyed ? "|" + step.value : "");
       if (previousKeys.has(key)) return { acted: false, key };

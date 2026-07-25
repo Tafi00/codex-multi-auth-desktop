@@ -37,6 +37,13 @@ test("keys code and phone actions by value so a retry is possible", () => {
   assert.match(script, /step\.keyed \? "\|" \+ step\.value : ""/);
 });
 
+test("rechecks the live page before typing an authenticator code", () => {
+  const script = buildOAuthAutomationScript(automation, { totpCode: "247323" }, null);
+  assert.match(script, /blockedTotpOnPhonePrompt/);
+  assert.match(script, /check your phone/);
+  assert.match(script, /resend text message/);
+});
+
 test("recognizes the SMS delivery option when the page renders it as a tab", () => {
   const script = buildOAuthAutomationScript(automation, {}, null);
   assert.match(script, /\[role='tab'\]/);
