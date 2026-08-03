@@ -8,7 +8,7 @@ export const DEFAULT_SMS_SETTINGS = {
   // HeroSMS uses the SMS-Activate country catalog: 33 is Colombia. Country
   // 39 is Argentina (it was incorrectly labelled as Colombia in v1).
   country: "33",
-  maxAttempts: 10,
+  maxAttempts: 3,
   codeTimeoutMs: 10_000,
   pollIntervalMs: 3_000,
   // The provider only refunds a number that is cancelled after two minutes,

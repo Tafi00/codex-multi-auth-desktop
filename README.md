@@ -5,7 +5,7 @@
 - Đăng nhập account mới bằng browser OAuth (không nhập password vào app).
 - Xem danh sách account và quota primary/secondary của từng account.
 - Switch thủ công một account, sau đó tự động đóng/mở Codex để nạp auth state mới trên macOS và Windows.
-- Export/import toàn bộ session giữa các thiết bị bằng file JSON thuần, không cần password.
+- Export/import toàn bộ session giữa các thiết bị bằng file JSON thuần, không cần password. File export được đọc lại để xác nhận đã ghi đầy đủ; khi import, account trùng được cập nhật bằng dữ liệu mới trong file.
 
 ## Xác minh số điện thoại (HeroSMS)
 
@@ -16,7 +16,7 @@ Các thông số vận hành được cố định trong app:
 | Thông số | Giá trị | Ghi chú |
 | --- | --- | --- |
 | Service | `dr` | OpenAI |
-| Số lần đổi số tối đa | `10` | Dừng tự động sau số thứ 10 |
+| Số lần đổi số tối đa | `3` | Dừng tự động sau số thứ 3 |
 | Thời gian chờ OTP | `10s` | Hết thời gian thì đổi số khác |
 | API | `https://hero-sms.com/stubs/handler_api.php` | HeroSMS |
 

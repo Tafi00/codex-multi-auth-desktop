@@ -17,6 +17,7 @@ test("defaults to a Colombian OpenAI activation", () => {
   const settings = normalizeSmsSettings({});
   assert.equal(settings.country, "33");
   assert.equal(settings.service, "dr");
+  assert.equal(settings.maxAttempts, 3);
   assert.ok(settings.refundDelayMs >= 120_000);
 });
 

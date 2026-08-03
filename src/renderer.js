@@ -123,7 +123,8 @@ async function run(action, successMessage) {
     const result = await action();
     if (result?.dashboard) render(result.dashboard);
     else if (result?.accounts) render(result);
-    if (successMessage) showToast(successMessage, "success");
+    const message = typeof successMessage === "function" ? successMessage(result) : successMessage;
+    if (message) showToast(message, "success");
     return result;
   } catch (error) {
     showToast(error?.message || String(error), "error");
@@ -456,9 +457,12 @@ $("#exportButton").addEventListener("click", async () => {
 });
 
 $("#importButton").addEventListener("click", async () => {
-  const approved = await confirmAction("Import sessions?", "Chỉ import file JSON do bạn tin cậy. Account trùng sẽ được bỏ qua; account hiện tại được giữ nguyên.");
+  const approved = await confirmAction("Import sessions?", "Chỉ import file JSON do bạn tin cậy. Account trùng sẽ được cập nhật bằng dữ liệu trong file; account hiện tại vẫn được giữ làm account đang chọn.");
   if (!approved) return;
-  await run(() => window.codexAuth.importSessions(), "Đã import sessions.");
+  await run(
+    () => window.codexAuth.importSessions(),
+    (result) => `Đã import: ${result?.added ?? 0} account mới, ${result?.updated ?? 0} account được cập nhật.`,
+  );
 });
 
 body.addEventListener("click", async (event) => {

@@ -28,6 +28,7 @@ import {
   extractIdentity,
 } from "./codex-auth.js";
 import { startOAuthCallbackServer } from "./oauth-callback.js";
+import { mergeImportedAccounts, serializeJson, verifySerializedJson } from "./session-transfer.js";
 
 const CODEX_HOME = process.env.CODEX_HOME?.trim() || join(homedir(), ".codex");
 const APP_DIR = join(CODEX_HOME, "multi-auth-desktop");
@@ -81,13 +82,23 @@ async function writeSecretJson(path, value) {
   await fs.mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
   try {
-    await fs.writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    await fs.writeFile(temp, serializeJson(value), { encoding: "utf8", mode: 0o600 });
     await fs.rename(temp, path);
     if (process.platform !== "win32") await fs.chmod(path, 0o600).catch(() => undefined);
   } catch (error) {
     await fs.unlink(temp).catch(() => undefined);
     throw error;
   }
+}
+
+async function writeVerifiedExport(path, value) {
+  const expected = serializeJson(value);
+  await writeSecretJson(path, value);
+  const written = await fs.readFile(path, "utf8");
+  // Reading back the saved bytes catches truncation and malformed data before
+  // the UI is allowed to report a successful export.
+  verifySerializedJson(written, expected);
+  return Buffer.byteLength(written, "utf8");
 }
 
 function sendLog(message, tone = "") {
@@ -785,8 +796,8 @@ ipcMain.handle("accounts:export", async () => {
   };
   const { filePath, canceled } = await dialog.showSaveDialog(mainWindow, { title: "Export Codex sessions", defaultPath: `codex-sessions-${new Date().toISOString().slice(0, 10)}.json`, filters: [{ name: "JSON", extensions: ["json"] }] });
   if (canceled || !filePath) return { cancelled: true };
-  await writeSecretJson(filePath, exportData);
-  return { cancelled: false, count: storage.accounts.length };
+  const bytes = await writeVerifiedExport(filePath, exportData);
+  return { cancelled: false, count: storage.accounts.length, bytes };
 });
 ipcMain.handle("accounts:import", async () => {
   const { filePaths, canceled } = await dialog.showOpenDialog(mainWindow, { title: "Import Codex sessions", properties: ["openFile"], filters: [{ name: "JSON", extensions: ["json"] }] });
@@ -797,11 +808,10 @@ ipcMain.handle("accounts:import", async () => {
   }
   const incoming = secureImportedLogins(assertImportShape(exportData, { allowSavedLogin: exportData?.version === 3 }));
   const storage = await loadStorage();
-  const existing = new Set(storage.accounts.map((account) => account.accountId || account.email || account.refreshToken));
-  const additions = incoming.filter((account) => !existing.has(account.accountId || account.email || account.refreshToken));
-  storage.accounts.push(...additions);
+  const merged = mergeImportedAccounts(storage.accounts, incoming);
+  storage.accounts = merged.accounts;
   await writeSecretJson(ACCOUNTS_PATH, storage);
-  return { cancelled: false, added: additions.length, skipped: incoming.length - additions.length, dashboard: await getDashboard() };
+  return { cancelled: false, added: merged.added, updated: merged.updated, dashboard: await getDashboard() };
 });
 
 app.whenReady().then(() => {
