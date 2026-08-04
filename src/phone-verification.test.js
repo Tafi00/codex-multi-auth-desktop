@@ -134,7 +134,7 @@ test("returns the SMS code once the provider reports it", async () => {
 test("rotates the number when no SMS arrives inside the wait budget", async () => {
   const client = createFakeClient({
     settings: {
-      ...normalizeSmsSettings({ codeTimeoutMs: 10_000, pollIntervalMs: 3_000 }),
+      ...normalizeSmsSettings({ codeTimeoutMs: 20_000, pollIntervalMs: 3_000 }),
       refundDelayMs: 0,
     },
   });

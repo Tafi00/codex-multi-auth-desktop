@@ -18,7 +18,12 @@ test("defaults to a Colombian OpenAI activation", () => {
   assert.equal(settings.country, "33");
   assert.equal(settings.service, "dr");
   assert.equal(settings.maxAttempts, 3);
+  assert.equal(settings.codeTimeoutMs, 20_000);
   assert.ok(settings.refundDelayMs >= 120_000);
+});
+
+test("always waits at least 20 seconds for an SMS code", () => {
+  assert.equal(normalizeSmsSettings({ codeTimeoutMs: 10_000 }).codeTimeoutMs, 20_000);
 });
 
 test("migrates the incorrectly labelled v1 Colombian country id", () => {

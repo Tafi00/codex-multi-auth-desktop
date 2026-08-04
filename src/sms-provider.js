@@ -9,7 +9,7 @@ export const DEFAULT_SMS_SETTINGS = {
   // 39 is Argentina (it was incorrectly labelled as Colombia in v1).
   country: "33",
   maxAttempts: 3,
-  codeTimeoutMs: 10_000,
+  codeTimeoutMs: 20_000,
   pollIntervalMs: 3_000,
   // The provider only refunds a number that is cancelled after two minutes,
   // so a rejected number is parked until that window closes.
@@ -146,7 +146,7 @@ export function normalizeSmsSettings(value) {
     service: String(value?.service ?? "").trim() || DEFAULT_SMS_SETTINGS.service,
     country: String(value?.country ?? "").trim() || DEFAULT_SMS_SETTINGS.country,
     maxAttempts: positiveInt(value?.maxAttempts, DEFAULT_SMS_SETTINGS.maxAttempts, { min: 1, max: 50 }),
-    codeTimeoutMs: positiveInt(value?.codeTimeoutMs, DEFAULT_SMS_SETTINGS.codeTimeoutMs, { min: 10_000, max: 900_000 }),
+    codeTimeoutMs: positiveInt(value?.codeTimeoutMs, DEFAULT_SMS_SETTINGS.codeTimeoutMs, { min: 20_000, max: 900_000 }),
     pollIntervalMs: positiveInt(value?.pollIntervalMs, DEFAULT_SMS_SETTINGS.pollIntervalMs, { min: 1_000, max: 30_000 }),
     refundDelayMs: positiveInt(value?.refundDelayMs, DEFAULT_SMS_SETTINGS.refundDelayMs, { min: 120_000, max: 600_000 }),
     requestTimeoutMs: positiveInt(value?.requestTimeoutMs, DEFAULT_SMS_SETTINGS.requestTimeoutMs, { min: 5_000, max: 60_000 }),
