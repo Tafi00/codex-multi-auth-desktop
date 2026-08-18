@@ -9,10 +9,17 @@ const toast = $("#toast");
 const dialog = $("#confirmDialog");
 const loginDialog = $("#loginDialog");
 const loginForm = $("#loginForm");
+const githubSyncDialog = $("#githubSyncDialog");
+const githubSyncForm = $("#githubSyncForm");
+const githubSyncButton = $("#githubSyncButton");
+const githubDeviceDialog = $("#githubDeviceDialog");
 let dashboard = { accounts: [] };
+let currentGithubSyncStatus = { connected: false, installed: true };
+let githubDeviceLoginActive = false;
 let busy = false;
 let loginInProgress = false;
 const loginButton = $("#loginButton");
+const updateButton = $("#updateButton");
 const STARTUP_AUTO_REFRESH_SETUP_DELAY_MS = 2_500;
 const AUTO_REFRESH_TICK_MS = 5_000;
 const CURRENT_ACCOUNT_REFRESH_MS = 60_000;
@@ -64,9 +71,9 @@ function render(data) {
     const current = account.current ? '<span class="current-pill">CURRENT</span>' : "";
     const accountMeta = plan || current ? `<span class="account-meta">${plan}${current}</span>` : "";
     const copyMenuPosition = accountPosition >= accounts.length - 2 ? "above" : "";
-    const savedLoginActions = account.hasSavedLogin
-      ? `<button class="icon-button action-icon" data-relogin="${account.index}" aria-label="Sign in again with saved credentials" title="Sign in again">↻</button><details class="copy-menu ${copyMenuPosition}"><summary class="icon-button action-icon" aria-label="Copy login details" title="Copy login details">⧉</summary><div class="copy-popover"><button data-copy="email" data-index="${account.index}">Copy email</button><button data-copy="password" data-index="${account.index}">Copy password</button><button data-copy="totp" data-index="${account.index}">Copy 2FA code</button></div></details>`
-      : `<button class="icon-button action-icon" disabled aria-label="Login details were not saved for this account" title="Login details were not saved">↻</button>`;
+    const reloginAction = account.hasSavedLogin
+      ? `<button class="icon-button action-icon" data-relogin="${account.index}" aria-label="Sign in again with saved credentials" title="Sign in again automatically">↻</button><details class="copy-menu ${copyMenuPosition}"><summary class="icon-button action-icon" aria-label="Copy login details" title="Copy login details">⧉</summary><div class="copy-popover"><button data-copy="email" data-index="${account.index}">Copy email</button><button data-copy="password" data-index="${account.index}">Copy password</button><button data-copy="totp" data-index="${account.index}">Copy 2FA code</button></div></details>`
+      : `<button class="icon-button action-icon" data-relogin="${account.index}" aria-label="Sign in again in browser" title="Sign in again in browser">↻</button>`;
     const switchLabel = account.current ? "Đang chọn" : "Switch";
     const deleteButton = account.current ? "" : `<button class="icon-button" data-delete="${account.index}" aria-label="Remove ${escapeHtml(displayName)}" title="Remove account">×</button>`;
     return `<tr>
@@ -74,7 +81,7 @@ function render(data) {
       <td><span class="status ${tone}"><i class="dot"></i>${escapeHtml(status)}</span></td>
       <td>${quotaHtml(account.quota, "primary")}</td>
       <td>${quotaHtml(account.quota, "secondary")}</td>
-      <td><div class="row-actions"><button class="button compact ${account.current ? "secondary" : "primary"}" data-switch="${account.index}" ${account.current ? "disabled" : ""}>${switchLabel}</button>${savedLoginActions}${deleteButton}</div></td>
+      <td><div class="row-actions"><button class="button compact ${account.current ? "secondary" : "primary"}" data-switch="${account.index}" ${account.current ? "disabled" : ""}>${switchLabel}</button>${reloginAction}${deleteButton}</div></td>
     </tr>`;
   }).join("");
   emptyState.hidden = accounts.length > 0;
@@ -89,9 +96,38 @@ function showToast(message, type = "") {
   toastTimer = setTimeout(() => { toast.hidden = true; }, 4200);
 }
 
+function formatSyncTime(timestamp) {
+  if (!timestamp) return "Chưa sync";
+  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(timestamp));
+}
+
+function renderGithubSyncStatus(status) {
+  currentGithubSyncStatus = { ...currentGithubSyncStatus, ...status };
+  const current = currentGithubSyncStatus;
+  githubSyncButton.classList.toggle("connected", Boolean(current.connected && !current.error));
+  githubSyncButton.classList.toggle("sync-error", Boolean(current.error));
+  $("#githubSyncButtonLabel").textContent = current.authenticated && current.login
+    ? `GitHub · @${current.login}`
+    : "Sign in with GitHub";
+
+  $("#githubSyncIdentity").hidden = !current.connected;
+  $("#githubSyncLogin").textContent = current.login ? `@${current.login}` : "—";
+  $("#githubSyncRepo").textContent = current.login && current.repo ? `${current.login}/${current.repo}` : "—";
+  $("#githubSyncLastSync").textContent = formatSyncTime(current.lastSyncAt);
+  $("#githubDisconnectButton").hidden = !current.connected;
+  $("#githubSyncConfirmButton").textContent = current.connected ? "Sync now" : "Connect & sync";
+  let description = "Đăng nhập GitHub trong browser và đồng bộ session qua một private repository.";
+  if (current.connected && current.error) description = `Lần sync gần nhất lỗi: ${current.error}`;
+  else if (current.connected) description = "Vault đã kết nối. Login, import và delete sẽ tự đồng bộ.";
+  else if (current.authenticated && current.activeLogin) description = `Đã đăng nhập @${current.activeLogin}. Nhấn Connect & sync để bắt đầu đồng bộ.`;
+  $("#githubSyncDescription").textContent = description;
+}
+
 function setBusy(next) {
   busy = next;
-  document.querySelectorAll("button").forEach((button) => { if (!button.matches("#clearLogButton")) button.disabled = next; });
+  document.querySelectorAll("button").forEach((button) => {
+    if (!button.matches("#clearLogButton, #githubDeviceCopyButton, #githubDeviceCancelButton")) button.disabled = next;
+  });
   if (loginInProgress) loginButton.disabled = false;
 }
 
@@ -109,9 +145,9 @@ function promptLoginCredentials() {
   loginDialog.showModal();
   return new Promise((resolve) => {
     loginDialog.addEventListener("close", () => {
-      const rawCredentials = loginDialog.returnValue === "confirm" ? $("#loginCredentials").value : null;
+      const credentials = loginDialog.returnValue === "confirm" ? $("#loginCredentials").value.trim() : null;
       loginForm.reset();
-      resolve(rawCredentials);
+      resolve(credentials);
     }, { once: true });
   });
 }
@@ -125,6 +161,7 @@ async function run(action, successMessage) {
     else if (result?.accounts) render(result);
     const message = typeof successMessage === "function" ? successMessage(result) : successMessage;
     if (message) showToast(message, "success");
+    if (result?.syncWarning) showToast(`Đã lưu trên máy nhưng GitHub sync lỗi: ${result.syncWarning}`, "error");
     return result;
   } catch (error) {
     showToast(error?.message || String(error), "error");
@@ -145,6 +182,7 @@ async function runLogin(action) {
     const result = await action();
     if (result?.dashboard) render(result.dashboard);
     showToast("Đăng nhập thành công.", "success");
+    if (result?.syncWarning) showToast(`Đăng nhập thành công nhưng GitHub sync lỗi: ${result.syncWarning}`, "error");
   } catch (error) {
     showToast(error?.message || String(error), "error");
   } finally {
@@ -156,18 +194,108 @@ async function runLogin(action) {
 
 async function handleLogin() {
   const rawCredentials = await promptLoginCredentials();
-  if (!rawCredentials) return;
-  let credentials;
-  try {
-    credentials = parseLoginCredentials(rawCredentials);
-  } catch (error) {
-    showToast(error?.message || String(error), "error");
-    return;
+  if (rawCredentials === null) return;
+  let credentials = null;
+  if (rawCredentials) {
+    try {
+      credentials = parseLoginCredentials(rawCredentials);
+    } catch (error) {
+      showToast(error?.message || String(error), "error");
+      return;
+    }
   }
   await runLogin(() => window.codexAuth.login(credentials));
 }
 
 loginButton.addEventListener("click", handleLogin);
+
+function openGithubSyncDialog() {
+  githubSyncDialog.returnValue = "cancel";
+  githubSyncDialog.showModal();
+}
+
+githubSyncButton.addEventListener("click", async () => {
+  if (busy) return;
+  let status = null;
+  setBusy(true);
+  try {
+    status = await window.codexAuth.githubSyncStatus();
+  } catch (error) {
+    showToast(error?.message || String(error), "error");
+  } finally {
+    setBusy(false);
+  }
+  if (status) renderGithubSyncStatus(status);
+  if (!status) return;
+  if (!status.authenticated) {
+    status = await run(() => window.codexAuth.githubLogin(), "Đã đăng nhập GitHub.");
+    if (!status) return;
+    renderGithubSyncStatus(status);
+  }
+  if (status.connected) {
+    const result = await run(
+      () => window.codexAuth.githubSync({}),
+      (value) => `Đã đồng bộ ${value?.accountCount ?? 0} Codex session với GitHub.`,
+    );
+    if (result?.status) renderGithubSyncStatus(result.status);
+    return;
+  }
+  openGithubSyncDialog();
+});
+
+githubSyncDialog.addEventListener("close", async () => {
+  const action = githubSyncDialog.returnValue;
+  githubSyncForm.reset();
+  if (action === "disconnect") {
+    const status = await run(
+      () => window.codexAuth.githubDisconnect(),
+      "Đã ngắt GitHub sync trên máy này; remote vault vẫn được giữ nguyên.",
+    );
+    if (status) renderGithubSyncStatus(status);
+    return;
+  }
+  if (action !== "sync") return;
+  const operation = currentGithubSyncStatus.connected
+    ? () => window.codexAuth.githubSync()
+    : () => window.codexAuth.githubConnect();
+  const result = await run(
+    operation,
+    (value) => `Đã đồng bộ ${value?.accountCount ?? 0} Codex session với GitHub.`,
+  );
+  if (result?.status) renderGithubSyncStatus(result.status);
+});
+
+window.codexAuth.onGithubSyncStatus((status) => renderGithubSyncStatus(status));
+window.codexAuth.onGithubDeviceCode((value) => {
+  if (value?.userCode) {
+    githubDeviceLoginActive = true;
+    $("#githubDeviceCode").textContent = value.userCode;
+    githubDeviceDialog.returnValue = "pending";
+    if (!githubDeviceDialog.open) githubDeviceDialog.showModal();
+    return;
+  }
+  githubDeviceLoginActive = false;
+  if (githubDeviceDialog.open) {
+    githubDeviceDialog.returnValue = "complete";
+    githubDeviceDialog.close();
+  }
+});
+
+githubDeviceDialog.addEventListener("close", () => {
+  if (githubDeviceLoginActive && githubDeviceDialog.returnValue !== "complete") {
+    githubDeviceLoginActive = false;
+    void window.codexAuth.githubCancelLogin();
+  }
+});
+
+$("#githubDeviceCopyButton").addEventListener("click", async () => {
+  try {
+    await window.codexAuth.githubCopyDeviceCode();
+    showToast("Đã copy GitHub login code.", "success");
+  } catch (error) {
+    showToast(error?.message || String(error), "error");
+  }
+});
 $("#refreshButton").addEventListener("click", async () => {
   const result = await run(() => window.codexAuth.refreshQuota(), "Đã cập nhật quota.");
   if (result?.probeErrors?.length) showToast(`Đã cập nhật; ${result.probeErrors.length} account không thể kiểm tra.`, "error");
@@ -465,6 +593,15 @@ $("#importButton").addEventListener("click", async () => {
   );
 });
 
+updateButton.addEventListener("click", async () => {
+  const result = await run(() => window.codexAuth.checkForUpdates(), "");
+  if (result && !result.enabled) {
+    showToast("Check update chỉ hoạt động trên bản app đã đóng gói.", "error");
+  } else if (result?.checking) {
+    showToast("Ứng dụng đang kiểm tra cập nhật.");
+  }
+});
+
 body.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-switch], [data-delete], [data-relogin], [data-copy]");
   if (!button) return;
@@ -495,6 +632,8 @@ body.addEventListener("click", async (event) => {
 
 async function startDashboard() {
   await run(() => window.codexAuth.load(), "");
+  const syncResult = await run(() => window.codexAuth.githubAutoSync(), "");
+  if (syncResult?.status) renderGithubSyncStatus(syncResult.status);
   void refreshQuotaInBackground();
   window.setTimeout(startAutoRefreshScheduler, STARTUP_AUTO_REFRESH_SETUP_DELAY_MS);
 }

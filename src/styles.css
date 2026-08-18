@@ -13,6 +13,10 @@ button { font: inherit; }
 .topbar { justify-content: space-between; gap: 24px; }
 h1 { margin: 0; font-size: 25px; letter-spacing: -.035em; }
 .header-actions, .toolbar-actions { gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+.github-sync-button { display: inline-flex; align-items: center; gap: 8px; }
+.sync-dot { width: 7px; height: 7px; border-radius: 50%; background: #6e7c8e; }
+.github-sync-button.connected .sync-dot { background: #4bd38f; box-shadow: 0 0 9px #4bd38f75; }
+.github-sync-button.sync-error .sync-dot { background: #dc6270; }
 .button { border: 1px solid transparent; border-radius: 8px; padding: 10px 14px; cursor: pointer; font-weight: 700; transition: transform .15s ease, background .15s ease, opacity .15s ease; }
 .button:hover { transform: translateY(-1px); }
 .button:disabled { cursor: wait; opacity: .55; transform: none; }
@@ -53,6 +57,13 @@ tbody tr:hover { background: rgba(64, 93, 126, .12); }
 dialog { width: min(460px, calc(100vw - 32px)); padding: 0; border: 1px solid #405168; border-radius: 12px; color: #eaf0f7; background: #151e29; box-shadow: 0 20px 80px #000a; }
 dialog::backdrop { background: rgba(0,0,0,.62); }.dialog-content { padding: 26px; }.dialog-content h2 { margin: 0; font-size: 20px; }.dialog-content > p:not(.eyebrow) { color: #aab7c6; line-height: 1.5; }.dialog-actions { justify-content: flex-end; gap: 10px; margin-top: 24px; }
 .form-field { display: grid; gap: 7px; margin-top: 16px; color: #c7d4e2; font-size: 13px; font-weight: 700; }.form-field input, .form-field select { width: 100%; min-height: 40px; border: 1px solid #405168; border-radius: 8px; padding: 10px 11px; outline: 0; background: #0e1620; color: #edf2f7; font: inherit; }.form-field input:focus, .form-field select:focus { border-color: #55a5ff; box-shadow: 0 0 0 3px #55a5ff26; }
+.sync-identity { display: grid; gap: 1px; overflow: hidden; margin-top: 16px; border: 1px solid #2d3c4e; border-radius: 9px; background: #263344; }
+.sync-identity > div { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 9px 11px; background: #111b27; font-size: 12px; }
+.sync-identity span { color: #8294a8; }.sync-identity strong { overflow: hidden; color: #dce6f1; text-overflow: ellipsis; white-space: nowrap; }
+.security-note { margin-bottom: 0; padding: 10px 11px; border: 1px solid #5f4d2d; border-radius: 8px; background: #2b2417; color: #d7bf8b !important; font-size: 12px; }
+.split-actions .action-spacer { flex: 1; }
+.device-code { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 16px; margin-top: 18px; border: 1px solid #45617f; border-radius: 9px; padding: 13px 15px; background: #0e1824; color: #8dbff5; cursor: pointer; }
+.device-code:hover { background: #142236; }.device-code code { color: #edf6ff; font-size: 20px; font-weight: 800; letter-spacing: .12em; }.device-code span { font-size: 12px; font-weight: 800; }
 #smsDialog { width: min(560px, calc(100vw - 32px)); }
 .checkbox-field { display: flex; align-items: center; gap: 9px; }.checkbox-field input { width: 16px; min-height: 0; height: 16px; padding: 0; }
 .input-action-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 9px; }

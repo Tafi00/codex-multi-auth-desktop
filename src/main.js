@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, safeStorage } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, safeStorage, shell } from "electron";
 import { createHash, randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import { promises as fs } from "node:fs";
@@ -28,24 +28,59 @@ import {
   extractIdentity,
 } from "./codex-auth.js";
 import { startOAuthCallbackServer } from "./oauth-callback.js";
-import { mergeImportedAccounts, serializeJson, verifySerializedJson } from "./session-transfer.js";
+import electronUpdater from "electron-updater";
+import { startAppUpdater } from "./app-updater.js";
+import { createControlledGuestChrome } from "./controlled-chrome.js";
+import {
+  findMatchingAccountIndex,
+  mergeImportedAccounts,
+  serializeJson,
+  verifySerializedJson,
+} from "./session-transfer.js";
+import {
+  DEFAULT_GITHUB_SYNC_FILE,
+  DEFAULT_GITHUB_SYNC_REPO,
+  createGitHubSyncClient,
+  pollGitHubDeviceToken,
+  refreshGitHubDeviceToken,
+  requestGitHubDeviceCode,
+} from "./github-sync.js";
+import {
+  accountSyncKey,
+  createSyncRecords,
+  decryptSyncVault,
+  isLegacyEncryptedSyncVault,
+  mergeSyncRecords,
+  normalizeSyncPayload,
+  syncRecordFingerprint,
+  tombstonesFromRecords,
+} from "./sync-vault.js";
 
 const CODEX_HOME = process.env.CODEX_HOME?.trim() || join(homedir(), ".codex");
 const APP_DIR = join(CODEX_HOME, "multi-auth-desktop");
 const ACCOUNTS_PATH = join(APP_DIR, "accounts.json");
 const QUOTA_PATH = join(APP_DIR, "quota-cache.json");
 const SETTINGS_PATH = join(APP_DIR, "settings.json");
+const GITHUB_SYNC_PATH = join(APP_DIR, "github-sync.json");
 const AUTH_PATH = join(CODEX_HOME, "auth.json");
 const LEGACY_ACCOUNTS_PATH = join(CODEX_HOME, "multi-auth", "openai-codex-accounts.json");
 const OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const OAUTH_REDIRECT = "http://localhost:1455/auth/callback";
 const OAUTH_SCOPE = "openid profile email offline_access";
+const GITHUB_OAUTH_CLIENT_ID = "Ov23liX3HZFNMIvYaKmW";
+const GITHUB_OAUTH_SCOPE = "repo offline_access";
 
 let mainWindow;
 let pendingLogin = null;
 let quotaRefreshTask = null;
+let githubSyncTask = null;
+let githubLoginTask = null;
+let githubLoginController = null;
+let pendingGithubUserCode = null;
+let appUpdaterController = null;
 const accountRefreshTasks = new Map();
 const QUOTA_REFRESH_CONCURRENCY = 4;
+const { autoUpdater } = electronUpdater;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -121,6 +156,8 @@ function normalizeAccount(account) {
     idToken: typeof account.idToken === "string" ? account.idToken : null,
     expiresAt: Number.isFinite(account.expiresAt) ? account.expiresAt : null,
     addedAt: Number.isFinite(account.addedAt) ? account.addedAt : Date.now(),
+    syncKey: typeof account.syncKey === "string" && account.syncKey.length <= 512 ? account.syncKey : null,
+    syncUpdatedAt: Number.isFinite(account.syncUpdatedAt) ? account.syncUpdatedAt : null,
     savedLogin: account.savedLogin && typeof account.savedLogin.email === "string" && typeof account.savedLogin.password === "string"
       ? {
         email: account.savedLogin.email.trim().toLowerCase(),
@@ -168,7 +205,11 @@ async function refreshAccount(account) {
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error("Session has expired. Please login again.");
-      return applyTokenResponse(account, data);
+      const updated = applyTokenResponse(account, data);
+      if (updated.refreshToken !== account.refreshToken || updated.idToken !== account.idToken) {
+        updated.syncUpdatedAt = Date.now();
+      }
+      return updated;
     })();
     accountRefreshTasks.set(refreshKey, task);
   }
@@ -329,7 +370,6 @@ function normalizeLoginAutomation(credentials) {
   const email = typeof credentials?.email === "string" ? credentials.email.trim().toLowerCase() : "";
   const password = typeof credentials?.password === "string" ? credentials.password : "";
   const totpSecret = typeof credentials?.totpSecret === "string" ? credentials.totpSecret.trim() : "";
-  if (!email || !password) throw new Error("Email and password are required.");
   return { email, password, totpSecret };
 }
 
@@ -401,27 +441,13 @@ function savedLoginFor(account) {
   };
 }
 
-function createOAuthLoginWindow(url, automation, callback, smsSession = null) {
-  const loginWindow = new BrowserWindow({
-    width: 520,
-    height: 760,
-    minWidth: 460,
-    minHeight: 640,
-    parent: mainWindow,
-    title: "Sign in to Codex",
-    backgroundColor: "#ffffff",
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-    },
-  });
+function attachOAuthAutomation(page, automation, callback, smsSession = null) {
   let filling = false;
   const completedActionKeys = new Set();
   let phoneSession = smsSession;
   let rotatePhone = false;
 
-  const readPageState = () => loginWindow.webContents.executeJavaScript(buildPageStateScript(), true);
+  const readPageState = () => page.executeJavaScript(buildPageStateScript());
 
   const stopPhoneAutomation = (message) => {
     sendLog(`Phone verification stopped: ${message}`, "error");
@@ -478,11 +504,11 @@ function createOAuthLoginWindow(url, automation, callback, smsSession = null) {
   };
 
   const tryAutofill = async () => {
-    if (filling || loginWindow.isDestroyed()) return;
-    if (loginWindow.webContents.isLoadingMainFrame()) return;
+    if (filling || await page.isDestroyed()) return;
+    if (await page.isLoading()) return;
     let pageUrl;
     try {
-      pageUrl = new URL(loginWindow.webContents.getURL());
+      pageUrl = new URL(await page.getURL());
     } catch {
       return;
     }
@@ -520,15 +546,14 @@ function createOAuthLoginWindow(url, automation, callback, smsSession = null) {
         }
       }
 
-      if (loginWindow.isDestroyed()) return;
-      const result = await loginWindow.webContents.executeJavaScript(
+      if (await page.isDestroyed()) return;
+      const result = await page.executeJavaScript(
         buildOAuthAutomationScript(automation, values, [...completedActionKeys]),
-        true,
       );
       if (result?.needsPhoneReset) {
-        if (loginWindow.webContents.canGoBack()) {
+        if (await page.canGoBack()) {
           completedActionKeys.clear();
-          loginWindow.webContents.goBack();
+          await page.goBack();
           sendLog("Returning to the phone form to rent another number.");
         } else {
           stopPhoneAutomation("the page offers no way back to phone entry. Finish this login by hand.");
@@ -563,27 +588,63 @@ function createOAuthLoginWindow(url, automation, callback, smsSession = null) {
     resetAction();
     void tryAutofill();
   };
-  loginWindow.webContents.on("did-start-navigation", (_event, _url, _isInPlace, isMainFrame) => {
-    if (isMainFrame) resetAction();
-  });
-  loginWindow.webContents.on("dom-ready", tryAutofill);
-  loginWindow.webContents.on("did-finish-load", tryAutofill);
-  loginWindow.webContents.on("did-navigate", resetAndAutofill);
-  loginWindow.webContents.on("did-navigate-in-page", (_event, _url, isMainFrame) => {
-    if (isMainFrame) resetAndAutofill();
-  });
-  loginWindow.on("closed", () => {
+  page.onNavigation(resetAndAutofill);
+  page.onClosed(() => {
     clearInterval(retryTimer);
     phoneSession?.dispose("login window closed");
-    callback.close();
+    void callback.close();
   });
+  void tryAutofill();
+}
+
+function createOAuthLoginWindow(url, automation, callback, smsSession = null) {
+  const loginWindow = new BrowserWindow({
+    width: 520,
+    height: 760,
+    minWidth: 460,
+    minHeight: 640,
+    parent: mainWindow,
+    title: "Sign in to Codex",
+    backgroundColor: "#ffffff",
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  const webContents = loginWindow.webContents;
+  const page = {
+    close: () => loginWindow.close(),
+    isDestroyed: () => loginWindow.isDestroyed(),
+    isLoading: () => webContents.isLoadingMainFrame(),
+    getURL: () => webContents.getURL(),
+    executeJavaScript: (expression) => webContents.executeJavaScript(expression, true),
+    canGoBack: () => webContents.navigationHistory?.canGoBack() ?? webContents.canGoBack(),
+    goBack: () => webContents.navigationHistory?.goBack() ?? webContents.goBack(),
+    onNavigation: (listener) => {
+      webContents.on("did-start-navigation", (_event, _url, _isInPlace, isMainFrame) => {
+        if (isMainFrame) listener();
+      });
+      webContents.on("did-navigate", listener);
+      webContents.on("did-navigate-in-page", (_event, _url, isMainFrame) => {
+        if (isMainFrame) listener();
+      });
+    },
+    onClosed: (listener) => loginWindow.on("closed", listener),
+  };
+  attachOAuthAutomation(page, automation, callback, smsSession);
   loginWindow.loadURL(url);
   return loginWindow;
 }
 
-async function startBrowserLogin(credentials) {
+async function startBrowserLogin(credentials = null) {
   if (pendingLogin) throw new Error("A login is already in progress.");
   let automation = normalizeLoginAutomation(credentials);
+  // Electron's embedded Chromium cannot surface the macOS platform
+  // authenticator in the version this app ships with. On macOS, use a real
+  // English Chrome Guest window controlled through Playwright so automation is
+  // preserved while Touch ID/iCloud Keychain can show its native passkey UI.
+  const useControlledGuestChrome = process.platform === "darwin";
   const verifier = base64Url(randomBytes(48));
   const challenge = base64Url(createHash("sha256").update(verifier).digest());
   const state = base64Url(randomBytes(32));
@@ -596,7 +657,7 @@ async function startBrowserLogin(credentials) {
     return null;
   });
   const cancel = async () => {
-    if (loginWindow && !loginWindow.isDestroyed()) loginWindow.close();
+    if (loginWindow && !loginWindow.isDestroyed()) await loginWindow.close();
     smsSession?.dispose("login finished");
     await callback.close();
   };
@@ -608,7 +669,13 @@ async function startBrowserLogin(credentials) {
       scope: OAUTH_SCOPE, code_challenge: challenge, code_challenge_method: "S256", state,
       id_token_add_organizations: "true", codex_cli_simplified_flow: "true", originator: "codex_cli_rs", prompt: "login",
     }).toString();
-    loginWindow = createOAuthLoginWindow(url.toString(), automation, callback, smsSession);
+    if (useControlledGuestChrome) {
+      loginWindow = await createControlledGuestChrome(url.toString());
+      attachOAuthAutomation(loginWindow, automation, callback, smsSession);
+      sendLog("Opened English Chrome Guest and connected Playwright login automation.");
+    } else {
+      loginWindow = createOAuthLoginWindow(url.toString(), automation, callback, smsSession);
+    }
     const code = await callback.wait();
     if (!code) throw new Error("Login was cancelled or timed out.");
     // OpenAI accepted the phone step, so close the activation instead of refunding it.
@@ -640,11 +707,14 @@ async function startBrowserLogin(credentials) {
       ...tokenState,
       id: existingAccount?.id ?? randomBytes(12).toString("hex"),
       addedAt: existingAccount?.addedAt ?? Date.now(),
-      savedLogin: {
+      syncUpdatedAt: Date.now(),
+      // Browser OAuth owns the credential entry (including Google sign-in),
+      // so this flow intentionally does not retain a password in app storage.
+      savedLogin: credentials ? {
         email: automation.email,
         password: encryptLoginSecret(automation.password),
         totpSecret: encryptLoginSecret(automation.totpSecret),
-      },
+      } : null,
     };
     if (existingIndex >= 0) storage.accounts[existingIndex] = account;
     else storage.accounts.push(account);
@@ -653,7 +723,9 @@ async function startBrowserLogin(credentials) {
     await writeSecretJson(ACCOUNTS_PATH, storage);
     // Login is complete only after the new active account has a fresh quota row.
     await refreshUsageQuota(new Set([account.id])).catch(() => undefined);
-    return { dashboard: await getDashboard() };
+    await cancel();
+    const syncWarning = await autoSyncGithubSessions();
+    return { dashboard: await getDashboard(), syncWarning };
   } finally {
     await cancel();
     automation = null;
@@ -694,6 +766,337 @@ function secureImportedLogins(accounts) {
   });
 }
 
+function emptyGithubSyncSettings() {
+  return {
+    version: 1,
+    enabled: false,
+    login: null,
+    repo: DEFAULT_GITHUB_SYNC_REPO,
+    file: DEFAULT_GITHUB_SYNC_FILE,
+    legacyEncryptedPassphrase: null,
+    encryptedAccessToken: null,
+    encryptedRefreshToken: null,
+    accessTokenExpiresAt: null,
+    refreshTokenExpiresAt: null,
+    tombstones: {},
+    lastSyncAt: null,
+  };
+}
+
+async function loadGithubSyncSettings() {
+  const stored = await readJson(GITHUB_SYNC_PATH, null);
+  const fallback = emptyGithubSyncSettings();
+  if (!stored || stored.version !== 1) return fallback;
+  return {
+    ...fallback,
+    enabled: stored.enabled === true,
+    login: typeof stored.login === "string" ? stored.login : null,
+    repo: typeof stored.repo === "string" && stored.repo ? stored.repo : fallback.repo,
+    file: typeof stored.file === "string" && stored.file ? stored.file : fallback.file,
+    // Version 1 stored the passphrase under this name. Retain it only until an
+    // encrypted vault can be migrated to the private-repository format.
+    legacyEncryptedPassphrase: typeof stored.legacyEncryptedPassphrase === "string"
+      ? stored.legacyEncryptedPassphrase
+      : (typeof stored.encryptedPassphrase === "string" ? stored.encryptedPassphrase : null),
+    encryptedAccessToken: typeof stored.encryptedAccessToken === "string" ? stored.encryptedAccessToken : null,
+    encryptedRefreshToken: typeof stored.encryptedRefreshToken === "string" ? stored.encryptedRefreshToken : null,
+    accessTokenExpiresAt: Number.isFinite(stored.accessTokenExpiresAt) ? stored.accessTokenExpiresAt : null,
+    refreshTokenExpiresAt: Number.isFinite(stored.refreshTokenExpiresAt) ? stored.refreshTokenExpiresAt : null,
+    tombstones: stored.tombstones && typeof stored.tombstones === "object" ? stored.tombstones : {},
+    lastSyncAt: Number.isFinite(stored.lastSyncAt) ? stored.lastSyncAt : null,
+  };
+}
+
+async function saveGithubSyncSettings(settings) {
+  await writeSecretJson(GITHUB_SYNC_PATH, { ...emptyGithubSyncSettings(), ...settings, version: 1 });
+}
+
+function githubSyncStatus(settings, extra = {}) {
+  return {
+    installed: true,
+    authenticated: extra.authenticated ?? Boolean(settings.encryptedAccessToken || settings.encryptedRefreshToken),
+    connected: settings.enabled === true,
+    login: settings.login,
+    activeLogin: extra.activeLogin ?? null,
+    repo: settings.repo,
+    repositoryUrl: settings.login ? `https://github.com/${settings.login}/${settings.repo}` : null,
+    lastSyncAt: settings.lastSyncAt,
+    error: extra.error ?? null,
+  };
+}
+
+function sendGithubSyncStatus(status) {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("github-sync:status", status);
+}
+
+function sendGithubDeviceCode(value) {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("github-sync:device-code", value);
+}
+
+function githubDeviceVerificationUrl(value) {
+  const url = new URL(value);
+  if (url.origin !== "https://github.com" || url.pathname !== "/login/device") {
+    throw new Error("GitHub trả về device verification URL không hợp lệ.");
+  }
+  return url.toString();
+}
+
+function settingsWithGithubTokens(settings, tokens, { preserveRefreshToken = false } = {}) {
+  const refreshToken = tokens.refreshToken
+    ? encryptLoginSecret(tokens.refreshToken)
+    : (preserveRefreshToken ? settings.encryptedRefreshToken : null);
+  return {
+    ...settings,
+    encryptedAccessToken: encryptLoginSecret(tokens.accessToken),
+    encryptedRefreshToken: refreshToken,
+    accessTokenExpiresAt: tokens.accessTokenExpiresAt,
+    refreshTokenExpiresAt: tokens.refreshTokenExpiresAt
+      ?? (preserveRefreshToken ? settings.refreshTokenExpiresAt : null),
+  };
+}
+
+function clearGithubTokens(settings) {
+  return {
+    ...settings,
+    encryptedAccessToken: null,
+    encryptedRefreshToken: null,
+    accessTokenExpiresAt: null,
+    refreshTokenExpiresAt: null,
+  };
+}
+
+async function usableGithubAccessToken(settings) {
+  if (
+    settings.encryptedAccessToken
+    && (!settings.accessTokenExpiresAt || settings.accessTokenExpiresAt > Date.now() + 60_000)
+  ) {
+    return { accessToken: decryptLoginSecret(settings.encryptedAccessToken), settings };
+  }
+  if (
+    settings.encryptedRefreshToken
+    && (!settings.refreshTokenExpiresAt || settings.refreshTokenExpiresAt > Date.now() + 60_000)
+  ) {
+    const refreshed = await refreshGitHubDeviceToken({
+      clientId: GITHUB_OAUTH_CLIENT_ID,
+      refreshToken: decryptLoginSecret(settings.encryptedRefreshToken),
+    });
+    const nextSettings = settingsWithGithubTokens(settings, refreshed, { preserveRefreshToken: true });
+    await saveGithubSyncSettings(nextSettings);
+    return { accessToken: refreshed.accessToken, settings: nextSettings };
+  }
+  throw new Error("GitHub cần đăng nhập lại.");
+}
+
+async function authorizeGithubDevice(settings) {
+  if (githubLoginTask) return githubLoginTask;
+  githubLoginController = new AbortController();
+  githubLoginTask = (async () => {
+    const device = await requestGitHubDeviceCode({
+      clientId: GITHUB_OAUTH_CLIENT_ID,
+      scope: GITHUB_OAUTH_SCOPE,
+    });
+    pendingGithubUserCode = device.userCode;
+    clipboard.writeText(device.userCode);
+    sendGithubDeviceCode({
+      userCode: device.userCode,
+      verificationUri: device.verificationUri,
+      expiresAt: Date.now() + device.expiresIn * 1000,
+    });
+    await shell.openExternal(githubDeviceVerificationUrl(device.verificationUri));
+    const tokens = await pollGitHubDeviceToken({
+      clientId: GITHUB_OAUTH_CLIENT_ID,
+      deviceCode: device.deviceCode,
+      intervalMs: device.intervalMs,
+      expiresIn: device.expiresIn,
+      signal: githubLoginController.signal,
+    });
+    return { accessToken: tokens.accessToken, settings: settingsWithGithubTokens(settings, tokens) };
+  })().finally(() => {
+    sendGithubDeviceCode(null);
+    pendingGithubUserCode = null;
+    githubLoginController = null;
+    githubLoginTask = null;
+  });
+  return githubLoginTask;
+}
+
+async function loginGithub() {
+  const settings = await loadGithubSyncSettings();
+  let auth;
+  try {
+    auth = await usableGithubAccessToken(settings);
+  } catch {
+    auth = await authorizeGithubDevice(settings);
+  }
+  const client = createGitHubSyncClient({ accessToken: auth.accessToken });
+  const user = await client.getAuthenticatedUser();
+  if (settings.enabled && settings.login && settings.login.toLowerCase() !== user.login.toLowerCase()) {
+    throw new Error(`Vault này đã kết nối với @${settings.login}; GitHub vừa đăng nhập là @${user.login}.`);
+  }
+  const nextSettings = { ...auth.settings, login: user.login };
+  await saveGithubSyncSettings(nextSettings);
+  const status = githubSyncStatus(nextSettings, { authenticated: true, activeLogin: user.login });
+  sendGithubSyncStatus(status);
+  return status;
+}
+
+async function probeGithubSyncStatus() {
+  const settings = await loadGithubSyncSettings();
+  if (!settings.encryptedAccessToken && !settings.encryptedRefreshToken) {
+    return githubSyncStatus(settings, {
+      authenticated: false,
+      error: settings.enabled ? "GitHub cần đăng nhập lại." : null,
+    });
+  }
+  try {
+    const auth = await usableGithubAccessToken(settings);
+    const client = createGitHubSyncClient({ accessToken: auth.accessToken });
+    const user = await client.getAuthenticatedUser();
+    const error = settings.enabled && settings.login && settings.login.toLowerCase() !== user.login.toLowerCase()
+      ? `Vault đã kết nối với @${settings.login}, nhưng token hiện tại thuộc @${user.login}.`
+      : null;
+    return githubSyncStatus(auth.settings, { authenticated: true, activeLogin: user.login, error });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return githubSyncStatus(settings, {
+      authenticated: false,
+      error: settings.enabled ? message : null,
+    });
+  }
+}
+
+function legacySyncPassphrase(settings) {
+  if (settings.legacyEncryptedPassphrase) return decryptLoginSecret(settings.legacyEncryptedPassphrase);
+  throw new Error("GitHub vault cũ vẫn được mã hóa. Hãy sync một lần từ máy còn lưu passphrase cũ để chuyển vault sang private-repository sync.");
+}
+
+function mergePortableAccounts(existingAccounts, records) {
+  const incomingAccounts = records.filter((record) => !record.deletedAt).map((record) => record.account);
+  const remaining = incomingAccounts.map((account) => ({ ...account }));
+  const accounts = [];
+  for (const existing of existingAccounts) {
+    const index = findMatchingAccountIndex(remaining, existing);
+    if (index < 0) continue;
+    const incoming = remaining.splice(index, 1)[0];
+    accounts.push({
+      ...existing,
+      ...incoming,
+      id: existing.id || incoming.id,
+      addedAt: existing.addedAt ?? incoming.addedAt,
+    });
+  }
+  accounts.push(...remaining);
+  return accounts;
+}
+
+async function runGithubSync({ interactiveAuth = false } = {}) {
+  const storedSettings = await loadGithubSyncSettings();
+  let auth;
+  try {
+    auth = await usableGithubAccessToken(storedSettings);
+  } catch (error) {
+    if (!interactiveAuth) throw error;
+    auth = await authorizeGithubDevice(storedSettings);
+  }
+  const client = createGitHubSyncClient({ accessToken: auth.accessToken });
+  const user = await client.getAuthenticatedUser();
+  if (storedSettings.enabled && storedSettings.login && storedSettings.login.toLowerCase() !== user.login.toLowerCase()) {
+    throw new Error(`Vault này đã kết nối với @${storedSettings.login}, nhưng GitHub vừa đăng nhập là @${user.login}.`);
+  }
+  const settings = { ...auth.settings, login: user.login };
+  await saveGithubSyncSettings(settings);
+
+  const repo = settings.repo || DEFAULT_GITHUB_SYNC_REPO;
+  const path = settings.file || DEFAULT_GITHUB_SYNC_FILE;
+  await client.ensurePrivateRepository(user.login, repo);
+  const remoteFile = await client.readVault(user.login, repo, path);
+  let remotePayload = { version: 1, updatedAt: 0, records: [] };
+  let legacyEncryptedVault = false;
+  if (remoteFile) {
+    let vault;
+    try {
+      vault = JSON.parse(remoteFile.content);
+    } catch {
+      throw new Error("GitHub vault file không phải JSON hợp lệ.");
+    }
+    legacyEncryptedVault = isLegacyEncryptedSyncVault(vault);
+    remotePayload = legacyEncryptedVault
+      ? await decryptSyncVault(vault, legacySyncPassphrase(settings))
+      : normalizeSyncPayload(vault);
+  }
+
+  const storage = await loadStorage();
+  const portable = portableAccounts(storage);
+  const localRecords = createSyncRecords(portable, settings.tombstones);
+  const mergedRecords = mergeSyncRecords(remotePayload.records, localRecords);
+  const activePlainAccounts = mergePortableAccounts(portable, mergedRecords);
+  const normalizedAccounts = assertImportShape({ accounts: activePlainAccounts }, { allowSavedLogin: true });
+  const previousActive = portable[storage.activeIndex] ?? null;
+  const nextActiveIndex = previousActive ? findMatchingAccountIndex(normalizedAccounts, previousActive) : -1;
+  if (previousActive && nextActiveIndex < 0) {
+    throw new Error("Account đang dùng đã bị xóa trên thiết bị khác. Hãy switch sang account khác rồi sync lại.");
+  }
+  const now = Date.now();
+
+  const wroteRemote = !remoteFile
+    || legacyEncryptedVault
+    || syncRecordFingerprint(remotePayload.records) !== syncRecordFingerprint(mergedRecords);
+  if (wroteRemote) {
+    const payload = normalizeSyncPayload({ version: 1, updatedAt: now, records: mergedRecords });
+    await client.writeVault(user.login, serializeJson(payload), { repo, path, sha: remoteFile?.sha ?? null });
+  }
+
+  storage.accounts = secureImportedLogins(normalizedAccounts);
+  storage.activeIndex = nextActiveIndex >= 0 ? nextActiveIndex : 0;
+  await writeSecretJson(ACCOUNTS_PATH, storage);
+
+  const nextSettings = {
+    ...settings,
+    enabled: true,
+    login: user.login,
+    repo,
+    file: path,
+    legacyEncryptedPassphrase: null,
+    tombstones: tombstonesFromRecords(mergedRecords),
+    lastSyncAt: now,
+  };
+  await saveGithubSyncSettings(nextSettings);
+  const status = githubSyncStatus(nextSettings, { authenticated: true, activeLogin: user.login });
+  sendGithubSyncStatus(status);
+  return {
+    dashboard: await getDashboard(),
+    status,
+    accountCount: storage.accounts.length,
+    wroteRemote,
+  };
+}
+
+async function syncGithubSessions(options = {}) {
+  if (githubSyncTask) return githubSyncTask;
+  githubSyncTask = runGithubSync(options).finally(() => { githubSyncTask = null; });
+  return githubSyncTask;
+}
+
+async function autoSyncGithubSessions() {
+  const settings = await loadGithubSyncSettings();
+  if (!settings.enabled) return null;
+  try {
+    await syncGithubSessions();
+    return null;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    sendGithubSyncStatus(githubSyncStatus(settings, { error: message }));
+    return message;
+  }
+}
+
+async function rememberAccountDeletion(account) {
+  const settings = await loadGithubSyncSettings();
+  const deletedAt = Date.now();
+  settings.tombstones[accountSyncKey(account)] = deletedAt;
+  await saveGithubSyncSettings(settings);
+}
+
 ipcMain.handle("settings:load-sms", async () => {
   const { settings, encryptedApiKey } = await loadSmsSettings();
   // The API key never leaves the main process; the UI only learns that one exists.
@@ -722,7 +1125,38 @@ ipcMain.handle("settings:list-sms-countries", async (_event, input) => {
   });
   return { service, offers: await client.getCountryOffers(service) };
 });
+ipcMain.handle("github-sync:status", () => probeGithubSyncStatus());
+ipcMain.handle("github-sync:login", () => loginGithub());
+ipcMain.handle("github-sync:cancel-login", () => {
+  const active = Boolean(githubLoginController);
+  githubLoginController?.abort();
+  return { cancelled: active };
+});
+ipcMain.handle("github-sync:copy-device-code", () => {
+  if (!pendingGithubUserCode) throw new Error("Không có GitHub login code đang hoạt động.");
+  clipboard.writeText(pendingGithubUserCode);
+  return { copied: true };
+});
+ipcMain.handle("github-sync:connect", () => syncGithubSessions({ interactiveAuth: true }));
+ipcMain.handle("github-sync:sync", () => syncGithubSessions({ interactiveAuth: true }));
+ipcMain.handle("github-sync:auto", async () => {
+  const syncWarning = await autoSyncGithubSessions();
+  return { dashboard: await getDashboard(), status: await probeGithubSyncStatus(), syncWarning };
+});
+ipcMain.handle("github-sync:disconnect", async () => {
+  const settings = await loadGithubSyncSettings();
+  const nextSettings = clearGithubTokens({ ...settings, enabled: false, legacyEncryptedPassphrase: null, login: null });
+  await saveGithubSyncSettings(nextSettings);
+  const status = githubSyncStatus(nextSettings);
+  sendGithubSyncStatus(status);
+  return status;
+});
 ipcMain.handle("accounts:load", () => getDashboard());
+ipcMain.handle("app:check-for-updates", async () => {
+  if (!appUpdaterController?.enabled) return { enabled: false };
+  const status = await appUpdaterController.check();
+  return { enabled: true, ...status };
+});
 ipcMain.handle("accounts:login", (_event, credentials) => startBrowserLogin(credentials));
 ipcMain.handle("accounts:cancel-login", () => {
   const activeLogin = pendingLogin;
@@ -754,9 +1188,7 @@ ipcMain.handle("accounts:relogin", async (_event, index) => {
   const storage = await loadStorage();
   const account = storage.accounts[index];
   if (!account) throw new Error("Account was not found.");
-  const credentials = savedLoginFor(account);
-  if (!credentials) throw new Error("This account has no saved login details.");
-  return startBrowserLogin(credentials);
+  return startBrowserLogin(savedLoginFor(account));
 });
 ipcMain.handle("accounts:copy-login", async (_event, index, field) => {
   const storage = await loadStorage();
@@ -780,10 +1212,13 @@ ipcMain.handle("accounts:delete", async (_event, index) => {
   const storage = await loadStorage();
   if (!storage.accounts[index]) throw new Error("Account was not found.");
   if (index === storage.activeIndex) throw new Error("Switch to another account before removing the active account.");
+  const deletedAccount = storage.accounts[index];
   storage.accounts.splice(index, 1);
   if (storage.activeIndex > index) storage.activeIndex -= 1;
   await writeSecretJson(ACCOUNTS_PATH, storage);
-  return getDashboard();
+  await rememberAccountDeletion(deletedAccount);
+  const syncWarning = await autoSyncGithubSessions();
+  return { dashboard: await getDashboard(), syncWarning };
 });
 ipcMain.handle("accounts:export", async () => {
   const storage = await loadStorage();
@@ -806,16 +1241,28 @@ ipcMain.handle("accounts:import", async () => {
   if (exportData?.encrypted) {
     throw new Error("Password-protected export files are no longer supported. Export the sessions again as plain JSON.");
   }
-  const incoming = secureImportedLogins(assertImportShape(exportData, { allowSavedLogin: exportData?.version === 3 }));
+  const importedAt = Date.now();
+  const incoming = secureImportedLogins(
+    assertImportShape(exportData, { allowSavedLogin: exportData?.version === 3 })
+      .map((account) => ({ ...account, syncUpdatedAt: importedAt })),
+  );
   const storage = await loadStorage();
   const merged = mergeImportedAccounts(storage.accounts, incoming);
   storage.accounts = merged.accounts;
   await writeSecretJson(ACCOUNTS_PATH, storage);
-  return { cancelled: false, added: merged.added, updated: merged.updated, dashboard: await getDashboard() };
+  const syncWarning = await autoSyncGithubSessions();
+  return { cancelled: false, added: merged.added, updated: merged.updated, dashboard: await getDashboard(), syncWarning };
 });
 
 app.whenReady().then(() => {
   createWindow();
+  appUpdaterController = startAppUpdater({
+    app,
+    updater: autoUpdater,
+    dialog,
+    getWindow: () => mainWindow,
+    notify: sendLog,
+  });
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });

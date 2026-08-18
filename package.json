@@ -1,6 +1,6 @@
 {
   "name": "codex-multi-auth-desktop",
-  "version": "0.1.25",
+  "version": "0.1.26",
   "description": "A simple desktop manager for Codex multi-account sessions.",
   "author": "Local",
   "type": "module",
@@ -8,12 +8,11 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron .",
-    "check": "node --check src/main.js && node --check src/codex-auth.js && node --check src/oauth-callback.js && node --check src/auto-refresh-scheduler.js && node --check src/codex-process.js && node --check src/sms-provider.js && node --check src/phone-verification.js && node --check src/login-automation.js && node --check src/preload.cjs && node --check src/renderer.js && node --test",
+    "check": "node --check src/main.js && node --check src/app-updater.js && node --check src/codex-auth.js && node --check src/oauth-callback.js && node --check src/auto-refresh-scheduler.js && node --check src/codex-process.js && node --check src/sms-provider.js && node --check src/phone-verification.js && node --check src/login-automation.js && node --check src/github-sync.js && node --check src/sync-vault.js && node --check src/controlled-chrome.js && node --check src/preload.cjs && node --check src/renderer.js && node --test",
     "package:mac": "electron-builder --mac",
     "package:win": "electron-builder --win",
     "package:linux": "electron-builder --linux"
   },
-  "dependencies": {},
   "devDependencies": {
     "electron": "^39.2.7",
     "electron-builder": "^26.8.1"
@@ -24,20 +23,40 @@
     "directories": {
       "output": "outputs"
     },
+    "artifactName": "Codex-Multi-Auth-${version}-${arch}.${ext}",
     "files": [
       "src/**/*",
       "package.json",
       "!src/**/*.test.js"
     ],
+    "publish": {
+      "provider": "github",
+      "owner": "Tafi00",
+      "repo": "codex-multi-auth-desktop",
+      "releaseType": "release"
+    },
     "mac": {
       "category": "public.app-category.developer-tools",
-      "target": ["dmg"]
+      "target": [
+        "dmg",
+        "zip"
+      ]
     },
     "win": {
-      "target": ["nsis"]
+      "target": [
+        "nsis"
+      ]
     },
     "linux": {
-      "target": ["AppImage"]
+      "target": [
+        "AppImage"
+      ]
     }
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9",
+    "playwright-core": "^1.62.1",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
   }
 }

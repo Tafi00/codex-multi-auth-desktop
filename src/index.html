@@ -14,6 +14,7 @@
           <h1>Codex accounts</h1>
         </div>
         <div class="header-actions">
+          <button class="button secondary github-sync-button" id="githubSyncButton"><span class="sync-dot" aria-hidden="true"></span><span id="githubSyncButtonLabel">Sign in with GitHub</span></button>
           <button class="button secondary" id="smsSettingsButton">Phone verification</button>
           <button class="button secondary" id="importButton">Import sessions</button>
           <button class="button secondary" id="exportButton">Export sessions</button>
@@ -24,6 +25,7 @@
       <section class="toolbar">
         <div class="summary" id="summary">Đang tải danh sách account…</div>
         <div class="toolbar-actions">
+          <button class="button compact secondary" id="updateButton">Check update</button>
           <button class="button compact secondary" id="refreshButton">Refresh quota</button>
         </div>
       </section>
@@ -74,14 +76,49 @@
       <form method="dialog" class="dialog-content" id="loginForm">
         <p class="eyebrow">LOGIN ACCOUNT</p>
         <h2>Sign in to Codex</h2>
-        <p>Nhập <code>email|password|2FA secret</code>. 2FA secret là tuỳ chọn; thông tin được mã hóa trong kho bảo mật hệ điều hành để có thể đăng nhập lại.</p>
+        <p>Để trống để đăng nhập bằng Google, passkey hoặc phương thức khác. Trên macOS, app mở Chrome Guest tiếng Anh và điều khiển bằng Playwright để popup Touch ID/passkey hoạt động. Nhập <code>email|password|2FA secret</code> nếu muốn app tự điền; 2FA secret là tuỳ chọn.</p>
         <label class="form-field">
-          <span>Login details</span>
-          <input id="loginCredentials" name="credentials" type="password" autocomplete="off" spellcheck="false" placeholder="email|password|2FA secret" required />
+          <span>Login details (optional)</span>
+          <input id="loginCredentials" name="credentials" type="password" autocomplete="off" spellcheck="false" placeholder="email|password|2FA secret" />
         </label>
         <div class="dialog-actions">
           <button class="button secondary" value="cancel" formnovalidate>Cancel</button>
           <button class="button primary" value="confirm">Open browser &amp; sign in</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="githubSyncDialog">
+      <form method="dialog" class="dialog-content" id="githubSyncForm">
+        <p class="eyebrow">PRIVATE CLOUD SYNC</p>
+        <h2>GitHub session sync</h2>
+        <p id="githubSyncDescription">Đăng nhập GitHub trong browser và đồng bộ session qua một private repository.</p>
+        <div class="sync-identity" id="githubSyncIdentity" hidden>
+          <div><span>GitHub account</span><strong id="githubSyncLogin">—</strong></div>
+          <div><span>Repository</span><strong id="githubSyncRepo">—</strong></div>
+          <div><span>Last sync</span><strong id="githubSyncLastSync">—</strong></div>
+        </div>
+        <p class="security-note">Session và login details đã lưu được đặt trong private repository này. Bất kỳ ai có quyền đọc repository cũng có thể đọc chúng.</p>
+        <div class="dialog-actions split-actions">
+          <button class="button danger" id="githubDisconnectButton" value="disconnect" formnovalidate hidden>Disconnect</button>
+          <span class="action-spacer"></span>
+          <button class="button secondary" value="cancel" formnovalidate>Cancel</button>
+          <button class="button primary" id="githubSyncConfirmButton" value="sync">Connect &amp; sync</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="githubDeviceDialog">
+      <form method="dialog" class="dialog-content">
+        <p class="eyebrow">GITHUB LOGIN</p>
+        <h2>Authorize in browser</h2>
+        <p>Browser đã được mở và login code đã được copy. Dán code này vào trang GitHub để tiếp tục:</p>
+        <button class="device-code" id="githubDeviceCopyButton" type="button" title="Copy GitHub login code">
+          <code id="githubDeviceCode">—</code>
+          <span>Copy</span>
+        </button>
+        <div class="dialog-actions">
+          <button class="button secondary" id="githubDeviceCancelButton" value="cancel">Cancel login</button>
         </div>
       </form>
     </dialog>

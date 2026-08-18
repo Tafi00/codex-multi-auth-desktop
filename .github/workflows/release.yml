@@ -7,6 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: write
   contents: write
 
 jobs:
@@ -36,6 +37,7 @@ jobs:
             files: |
               outputs/*.exe
               outputs/*.blockmap
+              outputs/latest.yml
           - os: macos-latest
             platform: macOS
             command: npm run package:mac -- --publish never
@@ -43,6 +45,8 @@ jobs:
             files: |
               outputs/*.dmg
               outputs/*.zip
+              outputs/*.blockmap
+              outputs/latest-mac.yml
 
     steps:
       - uses: actions/checkout@v5
@@ -58,7 +62,9 @@ jobs:
         env:
           # Publishing is handled only by the publish job below through the
           # built-in GITHUB_TOKEN, so these builds never need a personal token.
-          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          CSC_LINK: ${{ matrix.os == 'macos-latest' && secrets.CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ matrix.os == 'macos-latest' && secrets.CSC_KEY_PASSWORD || '' }}
+          CSC_IDENTITY_AUTO_DISCOVERY: ${{ matrix.os == 'macos-latest' && secrets.CSC_LINK != '' }}
 
       # Upload straight to the draft release. This avoids the repository-wide
       # GitHub Actions artifact quota while keeping both platform builds on CI.
@@ -74,6 +80,7 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.files }}
           if-no-files-found: error
+          retention-days: 1
 
   publish:
     name: Publish GitHub Release
@@ -86,3 +93,33 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+
+  cleanup:
+    name: Remove old releases and artifacts
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Keep only the 5 newest releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh api "repos/$GH_REPO/releases?per_page=100" \
+            --jq 'sort_by(.created_at) | reverse | .[5:] | .[].id' \
+            | while read -r release_id; do
+                gh api --method DELETE "repos/$GH_REPO/releases/$release_id"
+              done
+
+      - name: Delete Actions artifacts older than 24 hours
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cutoff="$(date -u -d '24 hours ago' '+%Y-%m-%dT%H:%M:%SZ')"
+          gh api --paginate "repos/$GH_REPO/actions/artifacts?per_page=100" \
+            --jq ".artifacts[] | select(.expired == false and .created_at < \"$cutoff\") | .id" \
+            | while read -r artifact_id; do
+                gh api --method DELETE "repos/$GH_REPO/actions/artifacts/$artifact_id"
+              done
