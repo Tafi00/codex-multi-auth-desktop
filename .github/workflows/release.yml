@@ -35,6 +35,7 @@ jobs:
           - os: windows-latest
             platform: Windows
             command: npm run package:win -- --publish never
+            unsigned_command: npm run package:win -- --publish never
             artifact: release-windows
             files: |
               outputs/*.exe
@@ -43,6 +44,7 @@ jobs:
           - os: macos-latest
             platform: macOS
             command: npm run package:mac -- --publish never
+            unsigned_command: npm run package:mac -- --publish never -c.mac.identity=-
             artifact: release-macos
             files: |
               outputs/*.dmg
@@ -62,7 +64,7 @@ jobs:
 
       - name: Build unsigned package
         if: matrix.os != 'macos-latest' || env.HAS_MAC_CERT != 'true'
-        run: ${{ matrix.command }}
+        run: ${{ matrix.unsigned_command }}
         env:
           # Publishing is handled only by the publish job below through the
           # built-in GITHUB_TOKEN, so these builds never need a personal token.

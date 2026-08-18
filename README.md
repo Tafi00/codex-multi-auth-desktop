@@ -60,7 +60,7 @@ App đã đóng gói sẽ tự kiểm tra GitHub Releases khi khởi động và
 
 Để phát hành, tăng `version` trong `package.json`, tạo và push tag cùng phiên bản (ví dụ `v0.1.26`). Workflow sẽ build Windows/macOS, publish kèm các file metadata `latest*.yml`, chỉ giữ **5 GitHub Releases mới nhất**, và xoá Actions artifacts cũ để tránh dùng hết quota. Tag Git cũ vẫn được giữ lại.
 
-Auto-update trên macOS yêu cầu app được ký. Thêm repository secrets `CSC_LINK` (certificate `.p12` dạng base64 hoặc URL) và `CSC_KEY_PASSWORD`; workflow vẫn build được khi chưa có hai secrets này nhưng macOS sẽ không tự cài bản mới chưa ký.
+Auto-update trên macOS yêu cầu bundle có chữ ký hợp lệ. Khi chưa có certificate secrets, workflow dùng chữ ký ad-hoc để Squirrel.Mac có thể xác minh update. Khi phát hành rộng rãi, nên thêm `CSC_LINK` (Developer ID Application certificate `.p12` dạng base64 hoặc URL) và `CSC_KEY_PASSWORD` để ký chính thức và tránh cảnh báo Gatekeeper ở lần cài đầu.
 
 GitHub Releases dùng làm nguồn cập nhật phải truy cập công khai. Repository hiện tại đang private, vì vậy trước khi phát hành cần đổi repository này sang public hoặc trỏ `build.publish` và workflow sang một public repository chỉ chứa release binaries. Không nhúng GitHub PAT vào app để đọc release private.
 
