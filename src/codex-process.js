@@ -217,17 +217,30 @@ $executablePath = $codexProcesses |
   Where-Object { $_ -and (Test-Path -LiteralPath $_) } |
   Select-Object -First 1
 
-if ($codexProcesses.Count -gt 0) {
-  if (-not (Request-CodexQuit $packagedCodex)) {
-    if (-not (Request-CodexWindowClose $packagedCodex)) {
-      throw 'Codex is running, but neither File > Exit nor a normal window close could be requested.'
-    }
+if ($restartMode -eq 'stop') {
+  # Codex on Windows can keep background workers alive after a normal window
+  # close. Those workers may rewrite auth.json after the account switch. Kill
+  # the exact Codex package processes, then wait until every old process is
+  # gone before the caller writes the selected account.
+  if ($codexProcesses.Count -gt 0) {
+    $codexProcesses | Stop-Process -Force -ErrorAction SilentlyContinue
   }
+
+  $exitDeadline = [DateTime]::UtcNow.AddSeconds(10)
+  do {
+    if (@(Get-CodexProcesses $packagedCodex).Count -eq 0) {
+      Start-Sleep -Milliseconds 800
+      exit 0
+    }
+    Start-Sleep -Milliseconds 100
+  } while ([DateTime]::UtcNow -lt $exitDeadline)
+
+  throw 'Codex processes were still running after force quit.'
 }
 
-# Match the macOS flow: request a normal quit, then reopen promptly rather
-# than blocking on every Windows helper process to exit.
-Start-Sleep -Milliseconds 700
+if ($restartMode -ne 'start') {
+  throw ('Unknown Codex restart mode: ' + $restartMode)
+}
 
 $launched = Start-PackagedCodex $packagedCodex
 if (-not $launched) {
@@ -265,6 +278,10 @@ if (-not (Wait-ForCodexStart $packagedCodex)) {
   throw 'Windows accepted the launch request, but Codex did not start within 10 seconds.'
 }
 `.trim();
+
+function windowsRestartScript(mode) {
+  return `$restartMode = '${mode}'\n${WINDOWS_RESTART_SCRIPT}`;
+}
 
 function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -353,6 +370,7 @@ export async function restartCodex({
   platform = process.platform,
   run = execFileAsync,
   pause = delay,
+  beforeLaunch,
 } = {}) {
   if (platform === "darwin") {
     const pids = await getMacCodexPids(run);
@@ -398,10 +416,19 @@ export async function restartCodex({
     }
     if (!exited) throw new Error("Could not close the previous Codex process.");
 
+    let beforeLaunchError = null;
+    try {
+      await beforeLaunch?.();
+    } catch (error) {
+      beforeLaunchError = error;
+    }
     await run("open", ["-a", "Codex"]);
     const startAttempts = Math.max(1, Math.ceil(8_000 / 120));
     for (let attempt = 0; attempt < startAttempts; attempt += 1) {
-      if ((await getMacCodexPids(run)).length > 0) return;
+      if ((await getMacCodexPids(run)).length > 0) {
+        if (beforeLaunchError) throw beforeLaunchError;
+        return;
+      }
       if (attempt < startAttempts - 1) await pause(120);
     }
     throw new Error("macOS accepted the launch request, but Codex did not start.");
@@ -416,8 +443,25 @@ export async function restartCodex({
         "-ExecutionPolicy",
         "Bypass",
         "-Command",
-        WINDOWS_RESTART_SCRIPT,
+        windowsRestartScript("stop"),
       ], { windowsHide: true, timeout: 20_000 });
+      let beforeLaunchError = null;
+      try {
+        await beforeLaunch?.();
+      } catch (error) {
+        beforeLaunchError = error;
+      }
+      await pause(400);
+      await run("powershell.exe", [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        windowsRestartScript("start"),
+      ], { windowsHide: true, timeout: 20_000 });
+      if (beforeLaunchError) throw beforeLaunchError;
     } catch (error) {
       const details = error?.stderr?.trim() || error?.message || String(error);
       throw new Error(`Could not restart Codex on Windows: ${details}`);

@@ -1179,10 +1179,13 @@ ipcMain.handle("accounts:switch", async (_event, index) => {
   const storage = await loadStorage();
   const account = storage.accounts[index];
   if (!account) throw new Error("Account was not found.");
-  storage.activeIndex = index;
-  await syncAccountToCodex(account);
-  await writeSecretJson(ACCOUNTS_PATH, storage);
-  await restartCodex();
+  await restartCodex({
+    beforeLaunch: async () => {
+      storage.activeIndex = index;
+      await syncAccountToCodex(account);
+      await writeSecretJson(ACCOUNTS_PATH, storage);
+    },
+  });
   return getDashboard();
 });
 ipcMain.handle("accounts:relogin", async (_event, index) => {

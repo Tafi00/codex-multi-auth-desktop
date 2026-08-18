@@ -112,12 +112,18 @@ test("force kills Codex only when graceful termination also stalls", async () =>
 
 test("restarts Codex through PowerShell on Windows", async () => {
   const calls = [];
+  const order = [];
   await restartCodex({
     platform: "win32",
-    run: async (...args) => { calls.push(args); },
+    run: async (...args) => {
+      calls.push(args);
+      order.push(args[1].at(-1).startsWith("$restartMode = 'stop'") ? "stop" : "start");
+    },
+    pause: async (milliseconds) => { order.push(`pause:${milliseconds}`); },
+    beforeLaunch: async () => { order.push("switch"); },
   });
 
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 2);
   const [file, args, options] = calls[0];
   assert.equal(file, "powershell.exe");
   assert.ok(args.includes("-NoProfile"));
@@ -127,26 +133,19 @@ test("restarts Codex through PowerShell on Windows", async () => {
   assert.match(script, /Get-Process -Name 'ChatGPT'/);
   assert.match(script, /Get-CodexProcesses/);
   assert.match(script, /Get-CodexUiProcesses/);
-  assert.match(script, /Request-CodexQuit/);
-  assert.match(script, /Request-CodexWindowClose/);
-  assert.match(script, /\$retryDeadline = \[DateTime\]::UtcNow.AddSeconds\(5\)/);
   assert.match(script, /Get-CodexProcesses \$Package/);
-  assert.match(script, /Add-Type -AssemblyName UIAutomationClient/);
-  assert.match(script, /ExpandCollapsePattern/);
-  assert.match(script, /\^Exit\(\?:\\s\|\$\)/);
-  assert.match(script, /InvokePattern/);
-  assert.match(script, /\$window\.SetFocus\(\)/);
-  assert.match(script, /\$process\.CloseMainWindow\(\)/);
-  assert.doesNotMatch(script, /Stop-Process -Force/);
+  assert.match(script, /Stop-Process -Force/);
+  assert.match(script, /\$exitDeadline = \[DateTime\]::UtcNow.AddSeconds\(10\)/);
+  assert.match(script, /Codex processes were still running after force quit/);
   assert.match(script, /Get-AppxPackage -Name 'OpenAI\.Codex'/);
   assert.match(script, /Get-StartApps/);
   assert.match(script, /shell:AppsFolder/);
   assert.match(script, /\^\(OpenAI\\s\+\)\?Codex\$/);
   assert.match(script, /-notmatch '\\\\WindowsApps\\\\'/);
-  assert.match(script, /Start-Sleep -Milliseconds 700/);
-  assert.doesNotMatch(script, /Wait-ForCodexExit/);
+  assert.match(script, /Start-Sleep -Milliseconds 800/);
   assert.match(script, /Windows accepted the launch request, but Codex did not start/);
   assert.deepEqual(options, { windowsHide: true, timeout: 20_000 });
+  assert.deepEqual(order, ["stop", "switch", "pause:400", "start"]);
 });
 
 test("returns a useful error when Windows restart fails", async () => {
@@ -161,6 +160,23 @@ test("returns a useful error when Windows restart fails", async () => {
     }),
     /Could not restart Codex on Windows: Codex executable was not found/,
   );
+});
+
+test("reopens Codex on Windows when switching credentials fails", async () => {
+  const scripts = [];
+  await assert.rejects(
+    restartCodex({
+      platform: "win32",
+      run: async (_file, args) => { scripts.push(args.at(-1)); },
+      pause: async () => undefined,
+      beforeLaunch: async () => { throw new Error("Could not write auth.json"); },
+    }),
+    /Could not write auth\.json/,
+  );
+
+  assert.equal(scripts.length, 2);
+  assert.ok(scripts[0].startsWith("$restartMode = 'stop'"));
+  assert.ok(scripts[1].startsWith("$restartMode = 'start'"));
 });
 
 test("does not silently claim restart support on other platforms", async () => {
