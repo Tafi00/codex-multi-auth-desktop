@@ -1152,6 +1152,7 @@ ipcMain.handle("github-sync:disconnect", async () => {
   return status;
 });
 ipcMain.handle("accounts:load", () => getDashboard());
+ipcMain.handle("app:get-version", () => app.getVersion());
 ipcMain.handle("app:check-for-updates", async () => {
   if (!appUpdaterController?.enabled) return { enabled: false };
   const status = await appUpdaterController.check();

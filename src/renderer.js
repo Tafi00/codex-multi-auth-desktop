@@ -631,6 +631,8 @@ body.addEventListener("click", async (event) => {
 });
 
 async function startDashboard() {
+  const version = await window.codexAuth.getAppVersion();
+  $("#appVersion").textContent = `Version ${version}`;
   await run(() => window.codexAuth.load(), "");
   const syncResult = await run(() => window.codexAuth.githubAutoSync(), "");
   if (syncResult?.status) renderGithubSyncStatus(syncResult.status);
