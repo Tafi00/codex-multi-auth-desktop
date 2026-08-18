@@ -1,5 +1,6 @@
 const DEFAULT_CHECK_INTERVAL_MS = 30 * 60 * 1000;
 const DEFAULT_DOWNLOADED_PROMPT_DELAY_MS = 2_500;
+const DEFAULT_INSTALL_DELAY_MS = 150;
 
 export function startAppUpdater({
   app,
@@ -9,6 +10,7 @@ export function startAppUpdater({
   notify = () => undefined,
   checkIntervalMs = DEFAULT_CHECK_INTERVAL_MS,
   downloadedPromptDelayMs = DEFAULT_DOWNLOADED_PROMPT_DELAY_MS,
+  installDelayMs = DEFAULT_INSTALL_DELAY_MS,
 }) {
   if (!app.isPackaged) return { enabled: false, stop: () => undefined };
 
@@ -50,7 +52,19 @@ export function startAppUpdater({
       const result = parent && !parent.isDestroyed()
         ? await dialog.showMessageBox(parent, options)
         : await dialog.showMessageBox(options);
-      if (result.response === 0) updater.quitAndInstall(false, true);
+      if (result.response === 0) {
+        // Hide first so the transition feels immediate and macOS never has a
+        // stale app window to redraw while Squirrel replaces the bundle.
+        if (parent && !parent.isDestroyed()) parent.hide();
+        setTimeout(() => {
+          try {
+            updater.quitAndInstall(true, true);
+          } catch (error) {
+            if (parent && !parent.isDestroyed()) parent.show();
+            onError(error);
+          }
+        }, installDelayMs);
+      }
     } catch (error) {
       onError(error);
     } finally {

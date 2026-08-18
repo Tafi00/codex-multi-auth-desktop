@@ -16,19 +16,27 @@ test("downloaded update can restart and install", async () => {
   updater.checkForUpdates = async () => { checks += 1; };
   let installArguments = null;
   updater.quitAndInstall = (...args) => { installArguments = args; };
+  const windowEvents = [];
+  const window = {
+    isDestroyed: () => false,
+    hide: () => windowEvents.push("hide"),
+    show: () => windowEvents.push("show"),
+  };
   const result = startAppUpdater({
     app: { isPackaged: true },
     updater,
     dialog: { showMessageBox: async () => ({ response: 0 }) },
-    getWindow: () => null,
+    getWindow: () => window,
     checkIntervalMs: 60_000,
     downloadedPromptDelayMs: 0,
+    installDelayMs: 0,
   });
 
   updater.emit("update-downloaded", { version: "1.2.3" });
   await new Promise((resolve) => setTimeout(resolve, 10));
 
-  assert.deepEqual(installArguments, [false, true]);
+  assert.deepEqual(windowEvents, ["hide"]);
+  assert.deepEqual(installArguments, [true, true]);
   assert.equal(updater.autoDownload, true);
   assert.equal(updater.autoInstallOnAppQuit, true);
   await result.check();
