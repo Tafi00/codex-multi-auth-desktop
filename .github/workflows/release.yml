@@ -26,6 +26,8 @@ jobs:
     name: Build ${{ matrix.platform }}
     needs: prepare
     runs-on: ${{ matrix.os }}
+    env:
+      HAS_MAC_CERT: ${{ secrets.CSC_LINK != '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -58,13 +60,20 @@ jobs:
 
       - run: npm ci
 
-      - run: ${{ matrix.command }}
+      - name: Build unsigned package
+        if: matrix.os != 'macos-latest' || env.HAS_MAC_CERT != 'true'
+        run: ${{ matrix.command }}
         env:
           # Publishing is handled only by the publish job below through the
           # built-in GITHUB_TOKEN, so these builds never need a personal token.
-          CSC_LINK: ${{ matrix.os == 'macos-latest' && secrets.CSC_LINK || '' }}
-          CSC_KEY_PASSWORD: ${{ matrix.os == 'macos-latest' && secrets.CSC_KEY_PASSWORD || '' }}
-          CSC_IDENTITY_AUTO_DISCOVERY: ${{ matrix.os == 'macos-latest' && secrets.CSC_LINK != '' }}
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Build signed macOS package
+        if: matrix.os == 'macos-latest' && env.HAS_MAC_CERT == 'true'
+        run: ${{ matrix.command }}
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
 
       # Upload straight to the draft release. This avoids the repository-wide
       # GitHub Actions artifact quota while keeping both platform builds on CI.
