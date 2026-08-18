@@ -1,4 +1,5 @@
 const DEFAULT_CHECK_INTERVAL_MS = 30 * 60 * 1000;
+const DEFAULT_DOWNLOADED_PROMPT_DELAY_MS = 2_500;
 
 export function startAppUpdater({
   app,
@@ -7,6 +8,7 @@ export function startAppUpdater({
   getWindow,
   notify = () => undefined,
   checkIntervalMs = DEFAULT_CHECK_INTERVAL_MS,
+  downloadedPromptDelayMs = DEFAULT_DOWNLOADED_PROMPT_DELAY_MS,
 }) {
   if (!app.isPackaged) return { enabled: false, stop: () => undefined };
 
@@ -14,16 +16,22 @@ export function startAppUpdater({
   updater.autoInstallOnAppQuit = true;
 
   let updatePromptOpen = false;
+  let updatePromptTimer = null;
   let checkInProgress = false;
 
   const onChecking = () => notify("Đang kiểm tra bản cập nhật...");
   const onAvailable = (info) => notify(`Đã tìm thấy bản ${info.version}, đang tải xuống...`);
   const onNotAvailable = () => notify("Ứng dụng đang ở phiên bản mới nhất.");
   const onError = (error) => {
+    if (updatePromptTimer) {
+      clearTimeout(updatePromptTimer);
+      updatePromptTimer = null;
+    }
     const message = error instanceof Error ? error.message : String(error);
     notify(`Không thể cập nhật tự động: ${message}`, "error");
   };
-  const onDownloaded = async (info) => {
+  const showDownloadedPrompt = async (info) => {
+    updatePromptTimer = null;
     notify(`Đã tải xong bản ${info.version}.`);
     if (updatePromptOpen) return;
     updatePromptOpen = true;
@@ -48,6 +56,17 @@ export function startAppUpdater({
     } finally {
       updatePromptOpen = false;
     }
+  };
+  const onDownloaded = (info) => {
+    if (updatePromptTimer || updatePromptOpen) return;
+    // Squirrel.Mac emits update-downloaded shortly before it finishes code
+    // signature validation. Give it time to report a validation error so the
+    // app never offers to install an update that macOS has already rejected.
+    updatePromptTimer = setTimeout(
+      () => void showDownloadedPrompt(info),
+      downloadedPromptDelayMs,
+    );
+    updatePromptTimer.unref?.();
   };
 
   updater.on("checking-for-update", onChecking);
@@ -81,6 +100,7 @@ export function startAppUpdater({
     stop() {
       clearTimeout(firstCheck);
       clearInterval(interval);
+      if (updatePromptTimer) clearTimeout(updatePromptTimer);
       updater.removeListener("checking-for-update", onChecking);
       updater.removeListener("update-available", onAvailable);
       updater.removeListener("update-not-available", onNotAvailable);
