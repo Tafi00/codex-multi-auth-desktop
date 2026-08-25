@@ -3,12 +3,14 @@ import test from "node:test";
 
 import {
   accountSyncKey,
+  applySyncRecordsToLocalAccounts,
   createSyncRecords,
   decryptSyncVault,
   encryptSyncVault,
   isLegacyEncryptedSyncVault,
   mergeSyncRecords,
   syncRecordFingerprint,
+  syncableAccount,
   tombstonesFromRecords,
 } from "./sync-vault.js";
 
@@ -26,16 +28,23 @@ test("reads the legacy encrypted sync payload before migrating it", async () => 
   const vault = await encryptSyncVault(payload, "a strong sync passphrase");
   assert.equal(isLegacyEncryptedSyncVault(vault), true);
   assert.equal(JSON.stringify(vault).includes("refresh-super-secret"), false);
-  assert.deepEqual(await decryptSyncVault(vault, "a strong sync passphrase"), payload);
+  assert.deepEqual(await decryptSyncVault(vault, "a strong sync passphrase"), {
+    version: 2,
+    updatedAt: 123,
+    records: [{
+      key: "account:acct-1",
+      updatedAt: 100,
+      account: { email: "person@example.com", accountId: "acct-1", addedAt: 100 },
+    }],
+  });
   await assert.rejects(() => decryptSyncVault(vault, "the wrong passphrase"), /giải mã|passphrase/);
 });
 
-test("uses stable account identities without putting a raw refresh token in the key", () => {
+test("uses stable account identities without accepting a session token as identity", () => {
   assert.equal(accountSyncKey({ accountId: "acct-1", email: "person@example.com" }), "account:acct-1");
   assert.equal(accountSyncKey({ email: "Person@Example.com" }), "email:person@example.com");
-  const refreshKey = accountSyncKey({ refreshToken: "raw-secret" });
-  assert.match(refreshKey, /^refresh:[a-f0-9]{64}$/);
-  assert.equal(refreshKey.includes("raw-secret"), false);
+  assert.equal(accountSyncKey({ id: "local-id", refreshToken: "raw-secret" }), "device:local-id");
+  assert.throws(() => accountSyncKey({ refreshToken: "raw-secret" }), /sync identity/);
 });
 
 test("merges records last-write-wins and lets a deletion win an exact tie", () => {
@@ -61,6 +70,60 @@ test("matches the same account across legacy email and account-id keys", () => {
   const merged = mergeSyncRecords(remote, local);
   assert.equal(merged.length, 1);
   assert.equal(merged[0].key, "account:acct-1");
-  assert.equal(merged[0].account.refreshToken, "new");
+  assert.equal(merged[0].account.refreshToken, undefined);
   assert.equal(syncRecordFingerprint(merged), syncRecordFingerprint([...local]));
+});
+
+test("GitHub records never contain device OAuth session fields", () => {
+  const account = {
+    email: "person@example.com",
+    accountId: "acct-1",
+    accessToken: "access-secret",
+    refreshToken: "refresh-secret",
+    idToken: "id-secret",
+    expiresAt: 999,
+    savedLogin: { email: "person@example.com", password: "password", totpSecret: "totp" },
+  };
+  const synced = syncableAccount(account);
+  assert.deepEqual(synced, {
+    email: "person@example.com",
+    accountId: "acct-1",
+    savedLogin: { email: "person@example.com", password: "password", totpSecret: "totp" },
+  });
+  const serialized = JSON.stringify(createSyncRecords([account]));
+  for (const secret of ["access-secret", "refresh-secret", "id-secret"]) {
+    assert.equal(serialized.includes(secret), false);
+  }
+});
+
+test("sync metadata cannot overwrite a local device session", () => {
+  const local = [{
+    id: "local-id",
+    email: "person@example.com",
+    accountId: "acct-1",
+    accessToken: "local-access",
+    refreshToken: "local-refresh",
+    idToken: "local-id-token",
+    expiresAt: 999,
+    syncUpdatedAt: 100,
+  }];
+  const legacyRemote = [{
+    key: "account:acct-1",
+    updatedAt: 200,
+    account: {
+      email: "person@example.com",
+      accountId: "acct-1",
+      accessToken: "remote-access",
+      refreshToken: "remote-refresh",
+      idToken: "remote-id-token",
+      expiresAt: 1,
+      savedLogin: { email: "person@example.com", password: "saved-password" },
+    },
+  }];
+  const [merged] = applySyncRecordsToLocalAccounts(local, legacyRemote);
+  assert.equal(merged.accessToken, "local-access");
+  assert.equal(merged.refreshToken, "local-refresh");
+  assert.equal(merged.idToken, "local-id-token");
+  assert.equal(merged.expiresAt, 999);
+  assert.equal(merged.savedLogin.password, "saved-password");
 });

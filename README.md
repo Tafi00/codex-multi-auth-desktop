@@ -5,18 +5,19 @@
 - Đăng nhập account mới bằng browser OAuth: chọn Google, passkey hoặc phương thức OpenAI mong muốn. Trên macOS, app mở Chrome Guest tiếng Anh và điều khiển bằng Playwright để tự điền/chuyển bước, đồng thời Touch ID/iCloud Keychain vẫn có thể hiển thị popup passkey.
 - Xem danh sách account và quota primary/secondary của từng account.
 - Switch thủ công một account, sau đó tự động đóng/mở Codex để nạp auth state mới trên macOS và Windows.
-- Đăng nhập GitHub và đồng bộ session giữa nhiều máy qua một private repository.
+- Đăng nhập GitHub và đồng bộ thông tin account/login đã lưu qua private repository; OAuth session chỉ nằm trên từng máy.
 - Export/import toàn bộ session giữa các thiết bị bằng file JSON thuần, không cần password. File export được đọc lại để xác nhận đã ghi đầy đủ; khi import, account trùng được cập nhật bằng dữ liệu mới trong file.
 
-## GitHub session sync
+## GitHub account sync
 
 Không cần cài GitHub CLI. Nhấn **Sign in with GitHub**; app mở GitHub trong browser bằng OAuth Device Flow, copy login code tự động và hoàn tất kết nối khi bạn xác nhận trên GitHub. OAuth App đã bật Device Flow, vì thế desktop app chỉ dùng client ID công khai — không đóng gói client secret.
 
 Access token và refresh token GitHub được mã hóa trong secure storage của hệ điều hành và không được đưa vào renderer hay GitHub vault. Quyền `repo` được dùng duy nhất để tạo/cập nhật repository sync private; GitHub sẽ hiển thị quyền này trước khi bạn cấp lần đầu.
 
-Lần kết nối đầu tiên sẽ tạo repository private `codex-multi-auth-sync` trong GitHub account đang hoạt động và ghi file `vault.json`. Mọi máy đăng nhập cùng GitHub account đều có thể merge session mà không cần nhập passphrase.
+Lần kết nối đầu tiên sẽ tạo repository private `codex-multi-auth-sync` trong GitHub account đang hoạt động và ghi file `vault.json`.
 
-- `vault.json` chứa session và login details đã lưu (nếu có) ở dạng thường trong private repository. Không cấp quyền repository cho người khác, không đổi repository thành public, và bảo vệ GitHub bằng passkey/2FA.
+- `vault.json` không chứa OAuth session (`accessToken`, `refreshToken`, `idToken` hoặc thời hạn token). Mỗi thiết bị giữ session riêng để tránh refresh token của máy này làm máy khác bị đăng xuất. Vault cũ được tự động làm sạch ở lần sync tiếp theo.
+- Login details đã lưu (nếu có) vẫn ở dạng thường trong private repository. Không cấp quyền repository cho người khác, không đổi repository thành public, và bảo vệ GitHub bằng passkey/2FA.
 - Login/import/delete tự sync sau khi GitHub sync được kết nối. App cũng pull/merge khi khởi động; nút **Sync now** dùng để đồng bộ thủ công.
 - Conflict được xử lý theo thay đổi mới nhất. Thao tác xóa có tombstone nên account không bị một máy cũ thêm trở lại.
 - Disconnect chỉ xóa liên kết trên máy hiện tại; private repository và vault vẫn còn trên GitHub.

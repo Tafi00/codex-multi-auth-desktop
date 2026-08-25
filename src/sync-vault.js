@@ -4,7 +4,8 @@ import { promisify } from "node:util";
 const deriveKey = promisify(scrypt);
 const VAULT_AAD = Buffer.from("codex-multi-auth:github-sync:v1", "utf8");
 const VAULT_VERSION = 1;
-const PAYLOAD_VERSION = 1;
+const PAYLOAD_VERSION = 2;
+const LEGACY_PAYLOAD_VERSION = 1;
 const SCRYPT_COST = 16_384;
 const MAX_VAULT_BYTES = 8 * 1024 * 1024;
 
@@ -28,15 +29,31 @@ function comparableRecord(record) {
   return JSON.stringify(record);
 }
 
+// GitHub sync intentionally carries account identity and optional saved login
+// details only. OAuth tokens are device-local because rotating a refresh token
+// on one device can invalidate a session restored on another device.
+export function syncableAccount(account) {
+  if (!account || typeof account !== "object") return {};
+  const result = {};
+  for (const field of ["email", "accountId", "usageAccountId", "planType", "addedAt"]) {
+    if (account[field] !== undefined && account[field] !== null) result[field] = account[field];
+  }
+  if (account.savedLogin && typeof account.savedLogin === "object") {
+    result.savedLogin = {
+      email: account.savedLogin.email,
+      password: account.savedLogin.password,
+      totpSecret: account.savedLogin.totpSecret ?? null,
+    };
+  }
+  return result;
+}
+
 function recordAliases(record) {
   const aliases = new Set([record.key]);
   const account = record.account;
   if (!account || typeof account !== "object") return aliases;
   if (typeof account.accountId === "string" && account.accountId) aliases.add(`account:${account.accountId}`);
   if (typeof account.email === "string" && account.email) aliases.add(`email:${account.email.trim().toLowerCase()}`);
-  if (typeof account.refreshToken === "string" && account.refreshToken) {
-    aliases.add(`refresh:${createHash("sha256").update(account.refreshToken).digest("hex")}`);
-  }
   return aliases;
 }
 
@@ -69,16 +86,14 @@ function normalizedRecord(record) {
   if (!record.account || typeof record.account !== "object") {
     throw new Error("GitHub vault chứa account record không hợp lệ.");
   }
-  return { key: record.key, updatedAt: record.updatedAt, account: { ...record.account } };
+  return { key: record.key, updatedAt: record.updatedAt, account: syncableAccount(record.account) };
 }
 
 export function accountSyncKey(account) {
   if (typeof account?.syncKey === "string" && account.syncKey) return account.syncKey;
   if (typeof account?.accountId === "string" && account.accountId) return `account:${account.accountId}`;
   if (typeof account?.email === "string" && account.email) return `email:${account.email.trim().toLowerCase()}`;
-  if (typeof account?.refreshToken === "string" && account.refreshToken) {
-    return `refresh:${createHash("sha256").update(account.refreshToken).digest("hex")}`;
-  }
+  if (typeof account?.id === "string" && account.id) return `device:${account.id}`;
   throw new Error("Không thể tạo sync identity cho account.");
 }
 
@@ -91,7 +106,7 @@ export function createSyncRecords(accounts, tombstones = {}, now = Date.now()) {
     return {
       key,
       updatedAt,
-      account: { ...account, syncKey: key, syncUpdatedAt: updatedAt },
+      account: { ...syncableAccount(account), syncKey: key, syncUpdatedAt: updatedAt },
     };
   });
   for (const [key, deletedAt] of Object.entries(tombstones ?? {})) {
@@ -114,7 +129,12 @@ export function mergeSyncRecords(leftRecords, rightRecords) {
 }
 
 export function normalizeSyncPayload(value) {
-  if (!value || value.version !== PAYLOAD_VERSION || !Array.isArray(value.records) || value.records.length > 500) {
+  if (
+    !value
+    || ![LEGACY_PAYLOAD_VERSION, PAYLOAD_VERSION].includes(value.version)
+    || !Array.isArray(value.records)
+    || value.records.length > 500
+  ) {
     throw new Error("GitHub vault không đúng định dạng được hỗ trợ.");
   }
   return {
@@ -122,6 +142,33 @@ export function normalizeSyncPayload(value) {
     updatedAt: Number.isFinite(value.updatedAt) ? value.updatedAt : 0,
     records: mergeSyncRecords([], value.records),
   };
+}
+
+export function applySyncRecordsToLocalAccounts(accounts, records) {
+  const normalizedRecords = mergeSyncRecords([], records);
+  return accounts.flatMap((localAccount) => {
+    const localKey = accountSyncKey(localAccount);
+    const localRecord = {
+      key: localKey,
+      updatedAt: Number.isFinite(localAccount.syncUpdatedAt) ? localAccount.syncUpdatedAt : 1,
+      account: syncableAccount(localAccount),
+    };
+    const record = normalizedRecords.find((candidate) => recordsMatch(localRecord, candidate));
+    if (!record) return [localAccount];
+    if (record.deletedAt) return [];
+    const synced = record.account;
+    return [{
+      ...localAccount,
+      email: synced.email ?? localAccount.email,
+      accountId: synced.accountId ?? localAccount.accountId,
+      usageAccountId: synced.usageAccountId ?? localAccount.usageAccountId,
+      planType: synced.planType ?? localAccount.planType,
+      addedAt: localAccount.addedAt ?? synced.addedAt,
+      savedLogin: synced.savedLogin ?? localAccount.savedLogin,
+      syncKey: record.key,
+      syncUpdatedAt: record.updatedAt,
+    }];
+  });
 }
 
 export function syncRecordFingerprint(records) {

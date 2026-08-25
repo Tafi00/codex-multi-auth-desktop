@@ -92,14 +92,14 @@
     <dialog id="githubSyncDialog">
       <form method="dialog" class="dialog-content" id="githubSyncForm">
         <p class="eyebrow">PRIVATE CLOUD SYNC</p>
-        <h2>GitHub session sync</h2>
-        <p id="githubSyncDescription">Đăng nhập GitHub trong browser và đồng bộ session qua một private repository.</p>
+        <h2>GitHub account sync</h2>
+        <p id="githubSyncDescription">Đồng bộ thông tin account qua private repository; session luôn được giữ riêng trên từng thiết bị.</p>
         <div class="sync-identity" id="githubSyncIdentity" hidden>
           <div><span>GitHub account</span><strong id="githubSyncLogin">—</strong></div>
           <div><span>Repository</span><strong id="githubSyncRepo">—</strong></div>
           <div><span>Last sync</span><strong id="githubSyncLastSync">—</strong></div>
         </div>
-        <p class="security-note">Session và login details đã lưu được đặt trong private repository này. Bất kỳ ai có quyền đọc repository cũng có thể đọc chúng.</p>
+        <p class="security-note">OAuth session không được tải lên. Login details đã lưu vẫn nằm trong private repository và có thể được đọc bởi người có quyền truy cập.</p>
         <div class="dialog-actions split-actions">
           <button class="button danger" id="githubDisconnectButton" value="disconnect" formnovalidate hidden>Disconnect</button>
           <span class="action-spacer"></span>

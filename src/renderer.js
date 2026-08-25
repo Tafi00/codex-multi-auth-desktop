@@ -116,9 +116,9 @@ function renderGithubSyncStatus(status) {
   $("#githubSyncLastSync").textContent = formatSyncTime(current.lastSyncAt);
   $("#githubDisconnectButton").hidden = !current.connected;
   $("#githubSyncConfirmButton").textContent = current.connected ? "Sync now" : "Connect & sync";
-  let description = "Đăng nhập GitHub trong browser và đồng bộ session qua một private repository.";
+  let description = "Đồng bộ thông tin account qua private repository; session luôn ở riêng trên từng thiết bị.";
   if (current.connected && current.error) description = `Lần sync gần nhất lỗi: ${current.error}`;
-  else if (current.connected) description = "Vault đã kết nối. Login, import và delete sẽ tự đồng bộ.";
+  else if (current.connected) description = "Vault đã kết nối. Session OAuth trên máy này sẽ không được upload hoặc ghi đè.";
   else if (current.authenticated && current.activeLogin) description = `Đã đăng nhập @${current.activeLogin}. Nhấn Connect & sync để bắt đầu đồng bộ.`;
   $("#githubSyncDescription").textContent = description;
 }
@@ -235,7 +235,7 @@ githubSyncButton.addEventListener("click", async () => {
   if (status.connected) {
     const result = await run(
       () => window.codexAuth.githubSync({}),
-      (value) => `Đã đồng bộ ${value?.accountCount ?? 0} Codex session với GitHub.`,
+      (value) => `Đã đồng bộ thông tin của ${value?.accountCount ?? 0} account với GitHub.`,
     );
     if (result?.status) renderGithubSyncStatus(result.status);
     return;
@@ -260,7 +260,7 @@ githubSyncDialog.addEventListener("close", async () => {
     : () => window.codexAuth.githubConnect();
   const result = await run(
     operation,
-    (value) => `Đã đồng bộ ${value?.accountCount ?? 0} Codex session với GitHub.`,
+    (value) => `Đã đồng bộ thông tin của ${value?.accountCount ?? 0} account với GitHub.`,
   );
   if (result?.status) renderGithubSyncStatus(result.status);
 });

@@ -47,6 +47,7 @@ import {
 } from "./github-sync.js";
 import {
   accountSyncKey,
+  applySyncRecordsToLocalAccounts,
   createSyncRecords,
   decryptSyncVault,
   isLegacyEncryptedSyncVault,
@@ -206,9 +207,6 @@ async function refreshAccount(account) {
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error("Session has expired. Please login again.");
       const updated = applyTokenResponse(account, data);
-      if (updated.refreshToken !== account.refreshToken || updated.idToken !== account.idToken) {
-        updated.syncUpdatedAt = Date.now();
-      }
       return updated;
     })();
     accountRefreshTasks.set(refreshKey, task);
@@ -970,25 +968,6 @@ function legacySyncPassphrase(settings) {
   throw new Error("GitHub vault cũ vẫn được mã hóa. Hãy sync một lần từ máy còn lưu passphrase cũ để chuyển vault sang private-repository sync.");
 }
 
-function mergePortableAccounts(existingAccounts, records) {
-  const incomingAccounts = records.filter((record) => !record.deletedAt).map((record) => record.account);
-  const remaining = incomingAccounts.map((account) => ({ ...account }));
-  const accounts = [];
-  for (const existing of existingAccounts) {
-    const index = findMatchingAccountIndex(remaining, existing);
-    if (index < 0) continue;
-    const incoming = remaining.splice(index, 1)[0];
-    accounts.push({
-      ...existing,
-      ...incoming,
-      id: existing.id || incoming.id,
-      addedAt: existing.addedAt ?? incoming.addedAt,
-    });
-  }
-  accounts.push(...remaining);
-  return accounts;
-}
-
 async function runGithubSync({ interactiveAuth = false } = {}) {
   const storedSettings = await loadGithubSyncSettings();
   let auth;
@@ -1010,8 +989,9 @@ async function runGithubSync({ interactiveAuth = false } = {}) {
   const path = settings.file || DEFAULT_GITHUB_SYNC_FILE;
   await client.ensurePrivateRepository(user.login, repo);
   const remoteFile = await client.readVault(user.login, repo, path);
-  let remotePayload = { version: 1, updatedAt: 0, records: [] };
+  let remotePayload = { version: 2, updatedAt: 0, records: [] };
   let legacyEncryptedVault = false;
+  let legacyPayload = false;
   if (remoteFile) {
     let vault;
     try {
@@ -1020,6 +1000,7 @@ async function runGithubSync({ interactiveAuth = false } = {}) {
       throw new Error("GitHub vault file không phải JSON hợp lệ.");
     }
     legacyEncryptedVault = isLegacyEncryptedSyncVault(vault);
+    legacyPayload = !legacyEncryptedVault && vault.version === 1;
     remotePayload = legacyEncryptedVault
       ? await decryptSyncVault(vault, legacySyncPassphrase(settings))
       : normalizeSyncPayload(vault);
@@ -1029,7 +1010,7 @@ async function runGithubSync({ interactiveAuth = false } = {}) {
   const portable = portableAccounts(storage);
   const localRecords = createSyncRecords(portable, settings.tombstones);
   const mergedRecords = mergeSyncRecords(remotePayload.records, localRecords);
-  const activePlainAccounts = mergePortableAccounts(portable, mergedRecords);
+  const activePlainAccounts = applySyncRecordsToLocalAccounts(portable, mergedRecords);
   const normalizedAccounts = assertImportShape({ accounts: activePlainAccounts }, { allowSavedLogin: true });
   const previousActive = portable[storage.activeIndex] ?? null;
   const nextActiveIndex = previousActive ? findMatchingAccountIndex(normalizedAccounts, previousActive) : -1;
@@ -1040,9 +1021,10 @@ async function runGithubSync({ interactiveAuth = false } = {}) {
 
   const wroteRemote = !remoteFile
     || legacyEncryptedVault
+    || legacyPayload
     || syncRecordFingerprint(remotePayload.records) !== syncRecordFingerprint(mergedRecords);
   if (wroteRemote) {
-    const payload = normalizeSyncPayload({ version: 1, updatedAt: now, records: mergedRecords });
+    const payload = normalizeSyncPayload({ version: 2, updatedAt: now, records: mergedRecords });
     await client.writeVault(user.login, serializeJson(payload), { repo, path, sha: remoteFile?.sha ?? null });
   }
 
