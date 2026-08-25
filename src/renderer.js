@@ -176,11 +176,13 @@ async function runLogin(action) {
     return;
   }
   loginInProgress = true;
+  let completed = false;
   loginButton.textContent = "Cancel login";
   setBusy(true);
   try {
     const result = await action();
     if (result?.dashboard) render(result.dashboard);
+    completed = true;
     showToast("Đăng nhập thành công.", "success");
     if (result?.syncWarning) showToast(`Đăng nhập thành công nhưng GitHub sync lỗi: ${result.syncWarning}`, "error");
   } catch (error) {
@@ -189,6 +191,14 @@ async function runLogin(action) {
     loginInProgress = false;
     loginButton.textContent = "+ Login account";
     setBusy(false);
+    if (completed) {
+      void refreshCurrentQuotaInBackground();
+      void window.codexAuth.githubAutoSync().then((syncResult) => {
+        if (syncResult?.dashboard) render(syncResult.dashboard);
+        if (syncResult?.status) renderGithubSyncStatus(syncResult.status);
+        if (syncResult?.syncWarning) showToast(`Đăng nhập thành công nhưng GitHub sync lỗi: ${syncResult.syncWarning}`, "error");
+      }).catch(() => undefined);
+    }
   }
 }
 

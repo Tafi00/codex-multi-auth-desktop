@@ -31,6 +31,7 @@ import { startOAuthCallbackServer } from "./oauth-callback.js";
 import electronUpdater from "electron-updater";
 import { startAppUpdater } from "./app-updater.js";
 import { createControlledGuestChrome } from "./controlled-chrome.js";
+import { settleWithin } from "./login-lifecycle.js";
 import {
   findMatchingAccountIndex,
   mergeImportedAccounts,
@@ -81,6 +82,8 @@ let pendingGithubUserCode = null;
 let appUpdaterController = null;
 const accountRefreshTasks = new Map();
 const QUOTA_REFRESH_CONCURRENCY = 4;
+const LOGIN_CLEANUP_TIMEOUT_MS = 2_000;
+const OAUTH_EXCHANGE_TIMEOUT_MS = 20_000;
 const { autoUpdater } = electronUpdater;
 
 function createWindow() {
@@ -650,14 +653,20 @@ async function startBrowserLogin(credentials = null) {
     throw new Error("Port 1455 is unavailable. Close another login flow and try again.");
   });
   let loginWindow;
+  let cancelTask = null;
   const smsSession = await createSmsSessionForLogin().catch((error) => {
     sendLog(`Phone verification is off: ${error instanceof Error ? error.message : String(error)}`, "error");
     return null;
   });
-  const cancel = async () => {
-    if (loginWindow && !loginWindow.isDestroyed()) await loginWindow.close();
+  const cancel = () => {
+    if (cancelTask) return cancelTask;
     smsSession?.dispose("login finished");
-    await callback.close();
+    const cleanupTasks = [Promise.resolve().then(() => callback.close())];
+    if (loginWindow && !loginWindow.isDestroyed()) {
+      cleanupTasks.push(Promise.resolve().then(() => loginWindow.close()));
+    }
+    cancelTask = settleWithin(Promise.allSettled(cleanupTasks), LOGIN_CLEANUP_TIMEOUT_MS);
+    return cancelTask;
   };
   pendingLogin = { close: () => { void cancel(); } };
   try {
@@ -676,12 +685,27 @@ async function startBrowserLogin(credentials = null) {
     }
     const code = await callback.wait();
     if (!code) throw new Error("Login was cancelled or timed out.");
-    // OpenAI accepted the phone step, so close the activation instead of refunding it.
-    await smsSession?.finish();
-    const response = await fetch("https://auth.openai.com/oauth/token", {
-      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ grant_type: "authorization_code", client_id: OAUTH_CLIENT_ID, code, code_verifier: verifier, redirect_uri: OAUTH_REDIRECT }),
-    });
+    // OpenAI accepted the phone step. Mark the activation complete, but never
+    // keep the UI waiting on a slow SMS provider response.
+    if (smsSession) void settleWithin(smsSession.finish(), LOGIN_CLEANUP_TIMEOUT_MS);
+    // The browser has completed its job. Close it before token processing so a
+    // slow quota request or sync cannot leave the login window spinning.
+    await cancel();
+    const exchangeController = new AbortController();
+    const exchangeTimeout = setTimeout(() => exchangeController.abort(), OAUTH_EXCHANGE_TIMEOUT_MS);
+    let response;
+    try {
+      response = await fetch("https://auth.openai.com/oauth/token", {
+        method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ grant_type: "authorization_code", client_id: OAUTH_CLIENT_ID, code, code_verifier: verifier, redirect_uri: OAUTH_REDIRECT }),
+        signal: exchangeController.signal,
+      });
+    } catch (error) {
+      if (exchangeController.signal.aborted) throw new Error("OpenAI OAuth exchange timed out. Please try again.");
+      throw error;
+    } finally {
+      clearTimeout(exchangeTimeout);
+    }
     const tokens = await response.json().catch(() => ({}));
     if (!response.ok) {
       const errorCode = typeof tokens.error === "string" ? `: ${tokens.error}` : "";
@@ -719,11 +743,7 @@ async function startBrowserLogin(credentials = null) {
     if (wasEmpty) storage.activeIndex = 0;
     if (wasEmpty || wasActive) await syncAccountToCodex(account);
     await writeSecretJson(ACCOUNTS_PATH, storage);
-    // Login is complete only after the new active account has a fresh quota row.
-    await refreshUsageQuota(new Set([account.id])).catch(() => undefined);
-    await cancel();
-    const syncWarning = await autoSyncGithubSessions();
-    return { dashboard: await getDashboard(), syncWarning };
+    return { dashboard: await getDashboard() };
   } finally {
     await cancel();
     automation = null;
