@@ -27,6 +27,7 @@ import {
   buildUsageHeaders,
   extractIdentity,
 } from "./codex-auth.js";
+import { captureCodexAuth } from "./codex-auth-sync.js";
 import { startOAuthCallbackServer } from "./oauth-callback.js";
 import electronUpdater from "electron-updater";
 import { startAppUpdater } from "./app-updater.js";
@@ -85,6 +86,17 @@ const QUOTA_REFRESH_CONCURRENCY = 4;
 const LOGIN_CLEANUP_TIMEOUT_MS = 2_000;
 const OAUTH_EXCHANGE_TIMEOUT_MS = 20_000;
 const { autoUpdater } = electronUpdater;
+let storageMutationTask = Promise.resolve();
+
+function withStorageMutationLock(operation) {
+  const previous = storageMutationTask;
+  let release;
+  storageMutationTask = new Promise((resolve) => { release = resolve; });
+  return previous
+    .catch(() => undefined)
+    .then(operation)
+    .finally(() => release());
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -200,8 +212,8 @@ async function refreshAccount(account) {
     task = (async () => {
       const response = await fetch("https://auth.openai.com/oauth/token", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
           grant_type: "refresh_token",
           client_id: OAUTH_CLIENT_ID,
           refresh_token: account.refreshToken,
@@ -327,7 +339,8 @@ async function runUsageQuotaRefresh(targetAccountIds = null) {
 
 async function refreshUsageQuota(targetAccountIds = null) {
   if (quotaRefreshTask) return quotaRefreshTask;
-  quotaRefreshTask = runUsageQuotaRefresh(targetAccountIds).finally(() => { quotaRefreshTask = null; });
+  quotaRefreshTask = withStorageMutationLock(() => runUsageQuotaRefresh(targetAccountIds))
+    .finally(() => { quotaRefreshTask = null; });
   return quotaRefreshTask;
 }
 
@@ -365,6 +378,21 @@ async function getDashboard() {
 async function syncAccountToCodex(account) {
   await usableAccessToken(account);
   await writeSecretJson(AUTH_PATH, buildCodexAuthFile(account));
+}
+
+async function captureLatestCodexAuth(storage) {
+  try {
+    const auth = await readJson(AUTH_PATH, null);
+    const result = captureCodexAuth(storage, auth);
+    if (result.updated) {
+      await writeSecretJson(ACCOUNTS_PATH, storage);
+      sendLog(`Đã lưu token mới nhất của account ${result.matchedIndex + 1} trước khi switch.`);
+    }
+  } catch (error) {
+    // A partially-written auth file must never prevent switching. The old
+    // managed credentials remain available and the next refresh can recover.
+    console.warn("[auth] Could not capture Codex credentials:", error);
+  }
 }
 
 function normalizeLoginAutomation(credentials) {
@@ -714,36 +742,44 @@ async function startBrowserLogin(credentials = null) {
     if (typeof tokens.access_token !== "string") throw new Error("OpenAI did not return a valid access token.");
     const identity = extractIdentity(tokens.access_token, tokens.id_token);
     const loginEmail = identity.email?.toLowerCase() ?? null;
-    const storage = await loadStorage();
-    const wasEmpty = storage.accounts.length === 0;
-    const existingIndex = storage.accounts.findIndex((account) =>
-      (identity.accountId && account.accountId === identity.accountId) || (loginEmail && account.email === loginEmail),
-    );
-    const wasActive = existingIndex === storage.activeIndex;
-    const existingAccount = existingIndex >= 0 ? storage.accounts[existingIndex] : null;
-    if (typeof tokens.refresh_token !== "string" && !existingAccount?.refreshToken) {
-      throw new Error("OpenAI did not return a reusable refresh token. Please try signing in again.");
-    }
-    const tokenState = applyTokenResponse(existingAccount ?? {}, tokens);
-    const account = {
-      ...tokenState,
-      id: existingAccount?.id ?? randomBytes(12).toString("hex"),
-      addedAt: existingAccount?.addedAt ?? Date.now(),
-      syncUpdatedAt: Date.now(),
-      // Browser OAuth owns the credential entry (including Google sign-in),
-      // so this flow intentionally does not retain a password in app storage.
-      savedLogin: credentials ? {
-        email: automation.email,
-        password: encryptLoginSecret(automation.password),
-        totpSecret: encryptLoginSecret(automation.totpSecret),
-      } : null,
-    };
-    if (existingIndex >= 0) storage.accounts[existingIndex] = account;
-    else storage.accounts.push(account);
-    if (wasEmpty) storage.activeIndex = 0;
-    if (wasEmpty || wasActive) await syncAccountToCodex(account);
-    await writeSecretJson(ACCOUNTS_PATH, storage);
-    return { dashboard: await getDashboard() };
+    const { account } = await withStorageMutationLock(async () => {
+      const storage = await loadStorage();
+      const wasEmpty = storage.accounts.length === 0;
+      const existingIndex = storage.accounts.findIndex((storedAccount) =>
+        (identity.accountId && storedAccount.accountId === identity.accountId)
+          || (loginEmail && storedAccount.email === loginEmail),
+      );
+      const wasActive = existingIndex === storage.activeIndex;
+      const existingAccount = existingIndex >= 0 ? storage.accounts[existingIndex] : null;
+      if (typeof tokens.refresh_token !== "string" && !existingAccount?.refreshToken) {
+        throw new Error("OpenAI did not return a reusable refresh token. Please try signing in again.");
+      }
+      const tokenState = applyTokenResponse(existingAccount ?? {}, tokens);
+      const account = {
+        ...tokenState,
+        id: existingAccount?.id ?? randomBytes(12).toString("hex"),
+        addedAt: existingAccount?.addedAt ?? Date.now(),
+        syncUpdatedAt: Date.now(),
+        // Browser OAuth owns the credential entry (including Google sign-in),
+        // so this flow intentionally does not retain a password in app storage.
+        savedLogin: credentials ? {
+          email: automation.email,
+          password: encryptLoginSecret(automation.password),
+          totpSecret: encryptLoginSecret(automation.totpSecret),
+        } : null,
+      };
+      if (existingIndex >= 0) storage.accounts[existingIndex] = account;
+      else storage.accounts.push(account);
+      if (wasEmpty) storage.activeIndex = 0;
+      if (wasEmpty || wasActive) await syncAccountToCodex(account);
+      await writeSecretJson(ACCOUNTS_PATH, storage);
+      return { account };
+    });
+    // Login is complete only after the new active account has a fresh quota row.
+    await refreshUsageQuota(new Set([account.id])).catch(() => undefined);
+    await cancel();
+    const syncWarning = await autoSyncGithubSessions();
+    return { dashboard: await getDashboard(), syncWarning };
   } finally {
     await cancel();
     automation = null;
@@ -988,7 +1024,26 @@ function legacySyncPassphrase(settings) {
   throw new Error("GitHub vault cũ vẫn được mã hóa. Hãy sync một lần từ máy còn lưu passphrase cũ để chuyển vault sang private-repository sync.");
 }
 
-async function runGithubSync({ interactiveAuth = false } = {}) {
+function mergePortableAccounts(existingAccounts, records) {
+  const incomingAccounts = records.filter((record) => !record.deletedAt).map((record) => record.account);
+  const remaining = incomingAccounts.map((account) => ({ ...account }));
+  const accounts = [];
+  for (const existing of existingAccounts) {
+    const index = findMatchingAccountIndex(remaining, existing);
+    if (index < 0) continue;
+    const incoming = remaining.splice(index, 1)[0];
+    accounts.push({
+      ...existing,
+      ...incoming,
+      id: existing.id || incoming.id,
+      addedAt: existing.addedAt ?? incoming.addedAt,
+    });
+  }
+  accounts.push(...remaining);
+  return accounts;
+}
+
+async function runGithubSyncUnlocked({ interactiveAuth = false } = {}) {
   const storedSettings = await loadGithubSyncSettings();
   let auth;
   try {
@@ -1071,6 +1126,13 @@ async function runGithubSync({ interactiveAuth = false } = {}) {
     accountCount: storage.accounts.length,
     wroteRemote,
   };
+}
+
+async function runGithubSync(options = {}) {
+  // Keep the remote merge and its final accounts.json write in the same queue
+  // as quota refreshes and account switching. Otherwise a slow sync can write
+  // a snapshot with an older activeIndex after a successful switch.
+  return withStorageMutationLock(() => runGithubSyncUnlocked(options));
 }
 
 async function syncGithubSessions(options = {}) {
@@ -1177,11 +1239,17 @@ ipcMain.handle("accounts:refresh-current-quota", async () => {
   const probeErrors = await refreshUsageQuota(new Set([account.id]));
   return { dashboard: await getDashboard(), probeErrors };
 });
-ipcMain.handle("accounts:switch", async (_event, index) => {
+ipcMain.handle("accounts:switch", (_event, index) => withStorageMutationLock(async () => {
   const storage = await loadStorage();
   const account = storage.accounts[index];
   if (!account) throw new Error("Account was not found.");
   await restartCodex({
+    // Codex may have rotated the active account's refresh token since the
+    // manager last wrote accounts.json. Capture it immediately before stopping
+    // the process so a later switch cannot resurrect an invalid token.
+    beforeStop: () => captureLatestCodexAuth(storage),
+    // A graceful shutdown can rotate/write one more token while it exits.
+    afterStop: () => captureLatestCodexAuth(storage),
     beforeLaunch: async () => {
       storage.activeIndex = index;
       await syncAccountToCodex(account);
@@ -1189,7 +1257,7 @@ ipcMain.handle("accounts:switch", async (_event, index) => {
     },
   });
   return getDashboard();
-});
+}));
 ipcMain.handle("accounts:relogin", async (_event, index) => {
   const storage = await loadStorage();
   const account = storage.accounts[index];
@@ -1215,13 +1283,16 @@ ipcMain.handle("accounts:copy-login", async (_event, index, field) => {
   return { field };
 });
 ipcMain.handle("accounts:delete", async (_event, index) => {
-  const storage = await loadStorage();
-  if (!storage.accounts[index]) throw new Error("Account was not found.");
-  if (index === storage.activeIndex) throw new Error("Switch to another account before removing the active account.");
-  const deletedAccount = storage.accounts[index];
-  storage.accounts.splice(index, 1);
-  if (storage.activeIndex > index) storage.activeIndex -= 1;
-  await writeSecretJson(ACCOUNTS_PATH, storage);
+  const { deletedAccount } = await withStorageMutationLock(async () => {
+    const storage = await loadStorage();
+    if (!storage.accounts[index]) throw new Error("Account was not found.");
+    if (index === storage.activeIndex) throw new Error("Switch to another account before removing the active account.");
+    const deletedAccount = storage.accounts[index];
+    storage.accounts.splice(index, 1);
+    if (storage.activeIndex > index) storage.activeIndex -= 1;
+    await writeSecretJson(ACCOUNTS_PATH, storage);
+    return { deletedAccount };
+  });
   await rememberAccountDeletion(deletedAccount);
   const syncWarning = await autoSyncGithubSessions();
   return { dashboard: await getDashboard(), syncWarning };
@@ -1252,10 +1323,13 @@ ipcMain.handle("accounts:import", async () => {
     assertImportShape(exportData, { allowSavedLogin: exportData?.version === 3 })
       .map((account) => ({ ...account, syncUpdatedAt: importedAt })),
   );
-  const storage = await loadStorage();
-  const merged = mergeImportedAccounts(storage.accounts, incoming);
-  storage.accounts = merged.accounts;
-  await writeSecretJson(ACCOUNTS_PATH, storage);
+  const merged = await withStorageMutationLock(async () => {
+    const storage = await loadStorage();
+    const merged = mergeImportedAccounts(storage.accounts, incoming);
+    storage.accounts = merged.accounts;
+    await writeSecretJson(ACCOUNTS_PATH, storage);
+    return merged;
+  });
   const syncWarning = await autoSyncGithubSessions();
   return { cancelled: false, added: merged.added, updated: merged.updated, dashboard: await getDashboard(), syncWarning };
 });

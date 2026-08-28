@@ -33,6 +33,29 @@ test("restarts Codex with the macOS application commands", async () => {
   ]);
 });
 
+test("captures credentials before stopping Codex", async () => {
+  const order = [];
+  let running = true;
+  const run = async (...args) => {
+    if (args[0] === "pgrep") return { stdout: running ? "123\n" : "" };
+    if (args[0] === "osascript") running = false;
+    if (args[0] === "kill" && args[1][0] === "-0" && !running) throw new Error("not running");
+    if (args[0] === "open") running = true;
+    order.push(args[0]);
+  };
+
+  await restartCodex({
+    platform: "darwin",
+    run,
+    pause: async () => undefined,
+    beforeStop: async () => { order.push("beforeStop"); },
+    beforeLaunch: async () => { order.push("beforeLaunch"); },
+  });
+
+  assert.equal(order[0], "beforeStop");
+  assert.ok(order.indexOf("beforeLaunch") < order.indexOf("open"));
+});
+
 test("accepts Codex's running-task quit confirmation before terminating it", async () => {
   const calls = [];
   let running = true;

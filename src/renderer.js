@@ -242,15 +242,15 @@ githubSyncButton.addEventListener("click", async () => {
     if (!status) return;
     renderGithubSyncStatus(status);
   }
-  if (status.connected) {
-    const result = await run(
-      () => window.codexAuth.githubSync({}),
-      (value) => `Đã đồng bộ thông tin của ${value?.accountCount ?? 0} account với GitHub.`,
-    );
-    if (result?.status) renderGithubSyncStatus(result.status);
-    return;
-  }
-  openGithubSyncDialog();
+  // A click on the GitHub button is an explicit request to sync. Previously,
+  // a freshly authenticated GitHub account stopped here and only opened the
+  // dialog, which made it look like a newly logged-in Codex account had not
+  // been uploaded (especially when its login credentials were not saved).
+  const result = await run(
+    () => window.codexAuth.githubSync({}),
+    (value) => `Đã đồng bộ ${value?.accountCount ?? 0} Codex session với GitHub.`,
+  );
+  if (result?.status) renderGithubSyncStatus(result.status);
 });
 
 githubSyncDialog.addEventListener("close", async () => {

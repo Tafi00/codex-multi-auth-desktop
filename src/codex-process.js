@@ -370,10 +370,13 @@ export async function restartCodex({
   platform = process.platform,
   run = execFileAsync,
   pause = delay,
+  beforeStop,
+  afterStop,
   beforeLaunch,
 } = {}) {
   if (platform === "darwin") {
     const pids = await getMacCodexPids(run);
+    await beforeStop?.();
     await Promise.all(pids.map((pid) => requestMacCodexQuit(run, pid)));
     let exited = await waitForMacPidsToExit({
       pids,
@@ -415,6 +418,7 @@ export async function restartCodex({
       });
     }
     if (!exited) throw new Error("Could not close the previous Codex process.");
+    await afterStop?.();
 
     let beforeLaunchError = null;
     try {
@@ -436,6 +440,7 @@ export async function restartCodex({
 
   if (platform === "win32") {
     try {
+      await beforeStop?.();
       await run("powershell.exe", [
         "-NoLogo",
         "-NoProfile",
@@ -445,6 +450,7 @@ export async function restartCodex({
         "-Command",
         windowsRestartScript("stop"),
       ], { windowsHide: true, timeout: 20_000 });
+      await afterStop?.();
       let beforeLaunchError = null;
       try {
         await beforeLaunch?.();
