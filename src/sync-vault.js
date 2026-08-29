@@ -4,8 +4,8 @@ import { promisify } from "node:util";
 const deriveKey = promisify(scrypt);
 const VAULT_AAD = Buffer.from("codex-multi-auth:github-sync:v1", "utf8");
 const VAULT_VERSION = 1;
-const PAYLOAD_VERSION = 2;
-const LEGACY_PAYLOAD_VERSION = 1;
+const PAYLOAD_VERSION = 3;
+const LEGACY_PAYLOAD_VERSIONS = [1, 2];
 const SCRYPT_COST = 16_384;
 const MAX_VAULT_BYTES = 8 * 1024 * 1024;
 
@@ -29,13 +29,13 @@ function comparableRecord(record) {
   return JSON.stringify(record);
 }
 
-// GitHub sync intentionally carries account identity and optional saved login
-// details only. OAuth tokens are device-local because rotating a refresh token
-// on one device can invalidate a session restored on another device.
+// GitHub sync carries the complete OAuth session so a newly added account can
+// be merged onto another device. Existing devices keep their local token when
+// merging, which prevents a remote refresh from replacing a live local one.
 export function syncableAccount(account) {
   if (!account || typeof account !== "object") return {};
   const result = {};
-  for (const field of ["email", "accountId", "usageAccountId", "planType", "addedAt"]) {
+  for (const field of ["email", "accountId", "usageAccountId", "planType", "addedAt", "accessToken", "refreshToken", "idToken", "expiresAt"]) {
     if (account[field] !== undefined && account[field] !== null) result[field] = account[field];
   }
   if (account.savedLogin && typeof account.savedLogin === "object") {
@@ -66,6 +66,11 @@ function winningRecord(left, right) {
   if (right.updatedAt > left.updatedAt) return right;
   if (right.updatedAt < left.updatedAt) return left;
   if (Boolean(right.deletedAt) !== Boolean(left.deletedAt)) return right.deletedAt ? right : left;
+  // During migration, an older identity-only record and a new transferable
+  // record can have the same timestamp. Prefer the one that has a session.
+  if (Boolean(right.account?.refreshToken) !== Boolean(left.account?.refreshToken)) {
+    return right.account?.refreshToken ? right : left;
+  }
   return comparableRecord(right) > comparableRecord(left) ? right : left;
 }
 
@@ -131,7 +136,7 @@ export function mergeSyncRecords(leftRecords, rightRecords) {
 export function normalizeSyncPayload(value) {
   if (
     !value
-    || ![LEGACY_PAYLOAD_VERSION, PAYLOAD_VERSION].includes(value.version)
+    || ![...LEGACY_PAYLOAD_VERSIONS, PAYLOAD_VERSION].includes(value.version)
     || !Array.isArray(value.records)
     || value.records.length > 500
   ) {
@@ -146,7 +151,8 @@ export function normalizeSyncPayload(value) {
 
 export function applySyncRecordsToLocalAccounts(accounts, records) {
   const normalizedRecords = mergeSyncRecords([], records);
-  return accounts.flatMap((localAccount) => {
+  const matchedKeys = new Set();
+  const merged = accounts.flatMap((localAccount) => {
     const localKey = accountSyncKey(localAccount);
     const localRecord = {
       key: localKey,
@@ -155,6 +161,7 @@ export function applySyncRecordsToLocalAccounts(accounts, records) {
     };
     const record = normalizedRecords.find((candidate) => recordsMatch(localRecord, candidate));
     if (!record) return [localAccount];
+    matchedKeys.add(record.key);
     if (record.deletedAt) return [];
     const synced = record.account;
     return [{
@@ -169,6 +176,11 @@ export function applySyncRecordsToLocalAccounts(accounts, records) {
       syncUpdatedAt: record.updatedAt,
     }];
   });
+  for (const record of normalizedRecords) {
+    if (record.deletedAt || matchedKeys.has(record.key) || !record.account?.refreshToken) continue;
+    merged.push({ ...record.account, syncKey: record.key, syncUpdatedAt: record.updatedAt });
+  }
+  return merged;
 }
 
 export function syncRecordFingerprint(records) {

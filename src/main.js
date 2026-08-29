@@ -1064,7 +1064,7 @@ async function runGithubSyncUnlocked({ interactiveAuth = false } = {}) {
   const path = settings.file || DEFAULT_GITHUB_SYNC_FILE;
   await client.ensurePrivateRepository(user.login, repo);
   const remoteFile = await client.readVault(user.login, repo, path);
-  let remotePayload = { version: 2, updatedAt: 0, records: [] };
+  let remotePayload = { version: 3, updatedAt: 0, records: [] };
   let legacyEncryptedVault = false;
   let legacyPayload = false;
   if (remoteFile) {
@@ -1075,7 +1075,7 @@ async function runGithubSyncUnlocked({ interactiveAuth = false } = {}) {
       throw new Error("GitHub vault file không phải JSON hợp lệ.");
     }
     legacyEncryptedVault = isLegacyEncryptedSyncVault(vault);
-    legacyPayload = !legacyEncryptedVault && vault.version === 1;
+    legacyPayload = !legacyEncryptedVault && vault.version !== 3;
     remotePayload = legacyEncryptedVault
       ? await decryptSyncVault(vault, legacySyncPassphrase(settings))
       : normalizeSyncPayload(vault);
@@ -1099,7 +1099,7 @@ async function runGithubSyncUnlocked({ interactiveAuth = false } = {}) {
     || legacyPayload
     || syncRecordFingerprint(remotePayload.records) !== syncRecordFingerprint(mergedRecords);
   if (wroteRemote) {
-    const payload = normalizeSyncPayload({ version: 2, updatedAt: now, records: mergedRecords });
+    const payload = normalizeSyncPayload({ version: 3, updatedAt: now, records: mergedRecords });
     await client.writeVault(user.login, serializeJson(payload), { repo, path, sha: remoteFile?.sha ?? null });
   }
 

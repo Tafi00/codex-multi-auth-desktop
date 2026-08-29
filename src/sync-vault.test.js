@@ -29,12 +29,12 @@ test("reads the legacy encrypted sync payload before migrating it", async () => 
   assert.equal(isLegacyEncryptedSyncVault(vault), true);
   assert.equal(JSON.stringify(vault).includes("refresh-super-secret"), false);
   assert.deepEqual(await decryptSyncVault(vault, "a strong sync passphrase"), {
-    version: 2,
+    version: 3,
     updatedAt: 123,
     records: [{
       key: "account:acct-1",
       updatedAt: 100,
-      account: { email: "person@example.com", accountId: "acct-1", addedAt: 100 },
+      account: { email: "person@example.com", accountId: "acct-1", addedAt: 100, refreshToken: "refresh-super-secret" },
     }],
   });
   await assert.rejects(() => decryptSyncVault(vault, "the wrong passphrase"), /giải mã|passphrase/);
@@ -70,11 +70,11 @@ test("matches the same account across legacy email and account-id keys", () => {
   const merged = mergeSyncRecords(remote, local);
   assert.equal(merged.length, 1);
   assert.equal(merged[0].key, "account:acct-1");
-  assert.equal(merged[0].account.refreshToken, undefined);
+  assert.equal(merged[0].account.refreshToken, "new");
   assert.equal(syncRecordFingerprint(merged), syncRecordFingerprint([...local]));
 });
 
-test("GitHub records never contain device OAuth session fields", () => {
+test("GitHub records carry OAuth session fields for cross-device account merge", () => {
   const account = {
     email: "person@example.com",
     accountId: "acct-1",
@@ -88,12 +88,12 @@ test("GitHub records never contain device OAuth session fields", () => {
   assert.deepEqual(synced, {
     email: "person@example.com",
     accountId: "acct-1",
+    accessToken: "access-secret",
+    refreshToken: "refresh-secret",
+    idToken: "id-secret",
+    expiresAt: 999,
     savedLogin: { email: "person@example.com", password: "password", totpSecret: "totp" },
   });
-  const serialized = JSON.stringify(createSyncRecords([account]));
-  for (const secret of ["access-secret", "refresh-secret", "id-secret"]) {
-    assert.equal(serialized.includes(secret), false);
-  }
 });
 
 test("sync metadata cannot overwrite a local device session", () => {
@@ -126,4 +126,19 @@ test("sync metadata cannot overwrite a local device session", () => {
   assert.equal(merged.idToken, "local-id-token");
   assert.equal(merged.expiresAt, 999);
   assert.equal(merged.savedLogin.password, "saved-password");
+});
+
+test("sync adds a remote account that is missing locally", () => {
+  const [merged] = applySyncRecordsToLocalAccounts([], [{
+    key: "account:acct-new",
+    updatedAt: 200,
+    account: {
+      email: "new@example.com",
+      accountId: "acct-new",
+      refreshToken: "remote-refresh",
+    },
+  }]);
+  assert.equal(merged.email, "new@example.com");
+  assert.equal(merged.refreshToken, "remote-refresh");
+  assert.equal(merged.syncKey, "account:acct-new");
 });

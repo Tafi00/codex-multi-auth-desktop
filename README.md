@@ -5,7 +5,7 @@
 - Đăng nhập account mới bằng browser OAuth: chọn Google, passkey hoặc phương thức OpenAI mong muốn. Trên macOS, app mở Chrome Guest tiếng Anh và điều khiển bằng Playwright để tự điền/chuyển bước, đồng thời Touch ID/iCloud Keychain vẫn có thể hiển thị popup passkey.
 - Xem danh sách account và quota primary/secondary của từng account.
 - Switch thủ công một account, sau đó tự động đóng/mở Codex để nạp auth state mới trên macOS và Windows.
-- Đăng nhập GitHub và đồng bộ thông tin account/login đã lưu qua private repository; OAuth session chỉ nằm trên từng máy.
+- Đăng nhập GitHub và đồng bộ account/session qua private repository để merge giữa các thiết bị.
 - Export/import toàn bộ session giữa các thiết bị bằng file JSON thuần, không cần password. File export được đọc lại để xác nhận đã ghi đầy đủ; khi import, account trùng được cập nhật bằng dữ liệu mới trong file.
 
 ## GitHub account sync
@@ -16,7 +16,7 @@ Access token và refresh token GitHub được mã hóa trong secure storage c�
 
 Lần kết nối đầu tiên sẽ tạo repository private `codex-multi-auth-sync` trong GitHub account đang hoạt động và ghi file `vault.json`.
 
-- `vault.json` không chứa OAuth session (`accessToken`, `refreshToken`, `idToken` hoặc thời hạn token). Mỗi thiết bị giữ session riêng để tránh refresh token của máy này làm máy khác bị đăng xuất. Vault cũ được tự động làm sạch ở lần sync tiếp theo.
+- `vault.json` chứa OAuth session để account mới có thể được merge sang thiết bị khác. Khi account đã tồn tại trên máy, token local được ưu tiên để hạn chế refresh token giữa các thiết bị ghi đè lẫn nhau.
 - Login details đã lưu (nếu có) vẫn ở dạng thường trong private repository. Không cấp quyền repository cho người khác, không đổi repository thành public, và bảo vệ GitHub bằng passkey/2FA.
 - Login/import/delete tự sync sau khi GitHub sync được kết nối. App cũng pull/merge khi khởi động; nút **Sync now** dùng để đồng bộ thủ công.
 - Conflict được xử lý theo thay đổi mới nhất. Thao tác xóa có tombstone nên account không bị một máy cũ thêm trở lại.
