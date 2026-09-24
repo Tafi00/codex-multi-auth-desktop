@@ -76,7 +76,7 @@ function render(data) {
       : `<button class="icon-button action-icon" data-relogin="${account.index}" aria-label="Sign in again in browser" title="Sign in again in browser">↻</button>`;
     const resetCredits = account.quota?.resetCredits;
     const resetDisabled = resetCredits === 0;
-    const resetCount = Number.isFinite(resetCredits) && resetCredits > 0 ? `<span class="reset-count">${resetCredits}</span>` : "";
+    const resetCount = Number.isFinite(resetCredits) ? `<span class="reset-count${resetCredits > 0 ? "" : " empty"}">${resetCredits}</span>` : "";
     const resetTitle = resetCredits === null || resetCredits === undefined
       ? "Reset quota: dùng 1 reset credit do Codex tặng để reset limit ngay"
       : resetDisabled
