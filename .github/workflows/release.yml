@@ -41,7 +41,7 @@ jobs:
               outputs/*.exe
               outputs/*.blockmap
               outputs/latest.yml
-          - os: macos-latest
+          - os: macos-15
             platform: macOS
             command: npm run package:mac -- --publish never
             unsigned_command: npm run package:mac -- --publish never -c.mac.identity=-
@@ -63,7 +63,7 @@ jobs:
       - run: npm ci
 
       - name: Build unsigned package
-        if: matrix.os != 'macos-latest' || env.HAS_MAC_CERT != 'true'
+        if: matrix.os != 'macos-15' || env.HAS_MAC_CERT != 'true'
         run: ${{ matrix.unsigned_command }}
         env:
           # Publishing is handled only by the publish job below through the
@@ -71,7 +71,7 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
       - name: Build signed macOS package
-        if: matrix.os == 'macos-latest' && env.HAS_MAC_CERT == 'true'
+        if: matrix.os == 'macos-15' && env.HAS_MAC_CERT == 'true'
         run: ${{ matrix.command }}
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
