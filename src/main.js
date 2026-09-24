@@ -1,5 +1,5 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, safeStorage, shell } from "electron";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
@@ -270,6 +270,40 @@ async function fetchUsage(account) {
     clearTimeout(timeout);
   }
 }
+// Mirrors 9router's consumeCodexRateLimitResetCredit: spends one Codex-granted
+// rate-limit reset credit to reset the account's quota windows server-side.
+async function consumeResetCredit(account) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20_000);
+  try {
+    let accessToken = await usableAccessToken(account);
+    const request = () => fetch("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume", {
+      method: "POST",
+      headers: buildUsageHeaders(account, accessToken),
+      body: JSON.stringify({ redeem_request_id: randomUUID() }),
+      signal: controller.signal,
+    });
+    let response = await request();
+    if (response.status === 401) {
+      accessToken = await refreshAccount(account);
+      response = await request();
+    }
+    const text = await response.text();
+    const data = text ? JSON.parse(text) : null;
+    const code = data?.code || null;
+    const windowsReset = Number.isFinite(Number(data?.windows_reset)) ? Number(data.windows_reset) : 0;
+    return {
+      ok: response.ok && (code === "reset" || windowsReset > 0),
+      noCredit: response.ok && code === "no_credit",
+      status: response.status,
+      code,
+      windowsReset,
+      message: data?.message || data?.error || data?.detail || null,
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 function cacheIsRecent(quota) {
   return Number.isFinite(quota?.updatedAt) && Date.now() - quota.updatedAt < 10 * 60_000;
@@ -368,6 +402,7 @@ async function getDashboard() {
         primaryResetAtMs: quota.primary?.resetAtMs ?? null,
         secondaryUsedPercent: quota.secondary?.usedPercent ?? null,
         secondaryResetAtMs: quota.secondary?.resetAtMs ?? null,
+        resetCredits: quota.resetCredits ?? null,
         updatedAt: quota.updatedAt,
       } : null,
     };
@@ -1239,6 +1274,29 @@ ipcMain.handle("accounts:refresh-current-quota", async () => {
   const probeErrors = await refreshUsageQuota(new Set([account.id]));
   return { dashboard: await getDashboard(), probeErrors };
 });
+ipcMain.handle("accounts:reset-quota", async (_event, index) => {
+  const storage = await loadStorage();
+  const account = storage.accounts[index];
+  if (!account) throw new Error("Account was not found.");
+  // Spend one Codex-granted reset credit to reset the quota windows
+  // server-side (same mechanism as 9router's codex-reset-credits).
+  const result = await consumeResetCredit(account);
+  if (result.noCredit) {
+    return { dashboard: await getDashboard(), noCredit: true };
+  }
+  if (!result.ok) {
+    throw new Error(result.message || `Reset credit request failed (${result.status}).`);
+  }
+  // Drop the cached snapshot so the refresh cannot reuse the pre-reset window.
+  const cache = await loadQuotaCache();
+  if (account.id && cache.byLocalId?.[account.id]) {
+    delete cache.byLocalId[account.id];
+    await writeSecretJson(QUOTA_PATH, cache);
+  }
+  while (quotaRefreshTask) await quotaRefreshTask.catch(() => undefined);
+  const probeErrors = await refreshUsageQuota(new Set([account.id]));
+  return { dashboard: await getDashboard(), probeErrors, windowsReset: result.windowsReset };
+});
 ipcMain.handle("accounts:switch", (_event, index) => withStorageMutationLock(async () => {
   const storage = await loadStorage();
   const account = storage.accounts[index];
@@ -1272,7 +1330,9 @@ ipcMain.handle("accounts:copy-login", async (_event, index, field) => {
   if (!credentials) throw new Error("This account has no saved login details.");
 
   let value;
-  if (field === "email") value = credentials.email;
+  if (field === "all") {
+    value = [credentials.email, credentials.password, credentials.totpSecret].filter(Boolean).join("|");
+  } else if (field === "email") value = credentials.email;
   else if (field === "password") value = credentials.password;
   else if (field === "totp") {
     if (!credentials.totpSecret) throw new Error("This account has no saved 2FA secret.");

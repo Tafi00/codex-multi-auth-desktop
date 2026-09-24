@@ -85,6 +85,9 @@ export function extractUsageQuota(data, now) {
     sourceAccountId: typeof data?.account_id === "string" ? data.account_id : null,
     sourceEmail: typeof data?.email === "string" ? data.email.trim().toLowerCase() : null,
     planType: typeof data?.plan_type === "string" ? data.plan_type : null,
+    resetCredits: Number.isFinite(Number(data?.rate_limit_reset_credits?.available_count))
+      ? Math.max(0, Number(data.rate_limit_reset_credits.available_count))
+      : null,
     allowed: typeof rateLimit.allowed === "boolean" ? rateLimit.allowed : null,
     limitReached: typeof rateLimit.limit_reached === "boolean" ? rateLimit.limit_reached : null,
     primary,

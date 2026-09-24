@@ -72,8 +72,17 @@ function render(data) {
     const accountMeta = plan || current ? `<span class="account-meta">${plan}${current}</span>` : "";
     const copyMenuPosition = accountPosition >= accounts.length - 2 ? "above" : "";
     const reloginAction = account.hasSavedLogin
-      ? `<button class="icon-button action-icon" data-relogin="${account.index}" aria-label="Sign in again with saved credentials" title="Sign in again automatically">↻</button><details class="copy-menu ${copyMenuPosition}"><summary class="icon-button action-icon" aria-label="Copy login details" title="Copy login details">⧉</summary><div class="copy-popover"><button data-copy="email" data-index="${account.index}">Copy email</button><button data-copy="password" data-index="${account.index}">Copy password</button><button data-copy="totp" data-index="${account.index}">Copy 2FA code</button></div></details>`
+      ? `<button class="icon-button action-icon" data-relogin="${account.index}" aria-label="Sign in again with saved credentials" title="Sign in again automatically">↻</button><details class="copy-menu ${copyMenuPosition}"><summary class="icon-button action-icon" aria-label="Copy login details" title="Copy login details">⧉</summary><div class="copy-popover"><button data-copy="all" data-index="${account.index}">Copy all (email|password|2FA)</button><button data-copy="email" data-index="${account.index}">Copy email</button><button data-copy="password" data-index="${account.index}">Copy password</button><button data-copy="totp" data-index="${account.index}">Copy 2FA code</button></div></details>`
       : `<button class="icon-button action-icon" data-relogin="${account.index}" aria-label="Sign in again in browser" title="Sign in again in browser">↻</button>`;
+    const resetCredits = account.quota?.resetCredits;
+    const resetDisabled = resetCredits === 0;
+    const resetCount = Number.isFinite(resetCredits) && resetCredits > 0 ? `<span class="reset-count">${resetCredits}</span>` : "";
+    const resetTitle = resetCredits === null || resetCredits === undefined
+      ? "Reset quota: dùng 1 reset credit do Codex tặng để reset limit ngay"
+      : resetDisabled
+        ? "Hết reset credit — Codex chưa tặng credit cho account này"
+        : `Reset quota: dùng 1 trong ${resetCredits} reset credit để reset limit ngay`;
+    const resetButton = `<button class="icon-button action-icon" data-reset="${account.index}" aria-label="Reset quota" title="${resetTitle}" ${resetDisabled ? "disabled" : ""}>⟲${resetCount}</button>`;
     const switchLabel = account.current ? "Đang chọn" : "Switch";
     const deleteButton = account.current ? "" : `<button class="icon-button" data-delete="${account.index}" aria-label="Remove ${escapeHtml(displayName)}" title="Remove account">×</button>`;
     return `<tr>
@@ -81,7 +90,7 @@ function render(data) {
       <td><span class="status ${tone}"><i class="dot"></i>${escapeHtml(status)}</span></td>
       <td>${quotaHtml(account.quota, "primary")}</td>
       <td>${quotaHtml(account.quota, "secondary")}</td>
-      <td><div class="row-actions"><button class="button compact ${account.current ? "secondary" : "primary"}" data-switch="${account.index}" ${account.current ? "disabled" : ""}>${switchLabel}</button>${reloginAction}${deleteButton}</div></td>
+      <td><div class="row-actions"><button class="button compact ${account.current ? "secondary" : "primary"}" data-switch="${account.index}" ${account.current ? "disabled" : ""}>${switchLabel}</button>${resetButton}${reloginAction}${deleteButton}</div></td>
     </tr>`;
   }).join("");
   emptyState.hidden = accounts.length > 0;
@@ -613,15 +622,27 @@ updateButton.addEventListener("click", async () => {
 });
 
 body.addEventListener("click", async (event) => {
-  const button = event.target.closest("[data-switch], [data-delete], [data-relogin], [data-copy]");
+  const button = event.target.closest("[data-switch], [data-delete], [data-relogin], [data-copy], [data-reset]");
   if (!button) return;
-  const index = Number(button.dataset.switch ?? button.dataset.delete ?? button.dataset.relogin ?? button.dataset.index);
+  const index = Number(button.dataset.switch ?? button.dataset.delete ?? button.dataset.relogin ?? button.dataset.reset ?? button.dataset.index);
   const account = dashboard.accounts.find((item) => item.index === index);
   if (button.dataset.copy) {
     const field = button.dataset.copy;
-    const label = { email: "Email", password: "Password", totp: "2FA code" }[field] || "Value";
-    await run(() => window.codexAuth.copyLogin(index, field), `${label} copied.`);
+    const label = { all: "email|password|2FA secret", email: "Email", password: "Password", totp: "2FA code" }[field] || "Value";
+    await run(() => window.codexAuth.copyLogin(index, field), `Đã copy ${label}.`);
     button.closest(".copy-menu")?.removeAttribute("open");
+    return;
+  }
+  if (button.dataset.reset !== undefined) {
+    const name = account?.email || account?.label || `account ${index + 1}`;
+    const approved = await confirmAction(
+      "Reset quota?",
+      `Dùng 1 reset credit do Codex tặng để reset limit 5h/weekly của ${name} ngay lập tức. Credit đã dùng không hoàn lại.`,
+    );
+    if (!approved) return;
+    const result = await run(() => window.codexAuth.resetQuota(index), `Đã reset quota cho ${name}.`);
+    if (result?.noCredit) showToast(`${name} không còn reset credit.`, "error");
+    else if (result?.probeErrors?.length) showToast(`Reset xong nhưng không kiểm tra lại được quota: ${result.probeErrors[0]}`, "error");
     return;
   }
   if (button.dataset.relogin !== undefined) {

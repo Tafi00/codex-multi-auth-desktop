@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld("codexAuth", {
   cancelLogin: () => ipcRenderer.invoke("accounts:cancel-login"),
   refreshQuota: () => ipcRenderer.invoke("accounts:refresh-quota"),
   refreshCurrentQuota: () => ipcRenderer.invoke("accounts:refresh-current-quota"),
+  resetQuota: (index) => ipcRenderer.invoke("accounts:reset-quota", index),
   switchAccount: (index) => ipcRenderer.invoke("accounts:switch", index),
   relogin: (index) => ipcRenderer.invoke("accounts:relogin", index),
   copyLogin: (index, field) => ipcRenderer.invoke("accounts:copy-login", index, field),
